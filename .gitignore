@@ -29,6 +29,9 @@ ENV/
 .pytest_cache/
 .mypy_cache/
 
+# Local CMake / native build tree (regenerate locally)
+build/
+
 # Logs and OS junk
 *.log
 logs/

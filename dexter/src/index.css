@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Base resets for Tauri transparent window */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  background: transparent !important;
+  overflow: hidden;
+  user-select: none;
+  font-family: 'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Custom scrollbar */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+/* Hide scrollbar for bubble stack */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Gradient mask for bubbles fade-out at top */
+.bubble-mask {
+  mask-image: linear-gradient(to bottom, transparent 0%, black 12%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 12%);
+}
+
+/* Frosted glass — heavy blur for brushed/matte look, no shadows (ghost on transparent windows) */
+@layer components {
+  .glass {
+    backdrop-filter: blur(40px) saturate(1.3) brightness(0.9);
+    -webkit-backdrop-filter: blur(40px) saturate(1.3) brightness(0.9);
+  }
+  .glass-subtle {
+    backdrop-filter: blur(24px) saturate(1.2) brightness(0.85);
+    -webkit-backdrop-filter: blur(24px) saturate(1.2) brightness(0.85);
+  }
+}
