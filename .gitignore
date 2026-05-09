@@ -1,0 +1,43 @@
+# Secrets and local env (never commit)
+.env
+.env.local
+.env.*.local
+!.env.example
+!.env.example.*
+*.pem
+*.key
+
+# Node / frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Rust / Tauri
+**/target/
+**/gen/schemas/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+ENV/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Logs and OS junk
+*.log
+logs/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE (keep team extensions if you use dexter/.vscode rules)
+.idea/
+
+# Local agent caches
+.claude/persist/
