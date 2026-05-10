@@ -44,7 +44,7 @@ Foi adotado o projeto **[travisvn/chatterbox-tts-api](https://github.com/travisv
 
 | Arquivo | Função |
 |---------|--------|
-| `TTS_SETUP.md` | Guia de setup, API, troubleshooting e dicas de qualidade da voz |
+| `Documentação/TTS_SETUP.md` | Guia de setup, API, troubleshooting e dicas de qualidade da voz |
 
 ### 4. App Dexter (Rust)
 
@@ -123,7 +123,7 @@ Medições aproximadas na máquina usada na sessão (RTX 3070, etc.):
 
 - `dexter/setup-tts.ps1` — criado/atualizado  
 - `dexter/register-voice.ps1` — criado  
-- `dexter/TTS_SETUP.md` — criado  
+- `dexter/Documentação/TTS_SETUP.md` — criado  
 - `dexter/start-all.ps1` — seção Chatterbox + env UTF-8 + venv Python  
 - `dexter/src-tauri/src/lib.rs` — default `chatterbox_voice`  
 - `dexter/src-tauri/src/voice.rs` — `response_format: wav`  
@@ -149,4 +149,4 @@ Podem existir na pasta `dexter/` (podem ser apagados se não forem necessários)
 
 ---
 
-*Documento gerado para registrar o trabalho da sessão; complementa `TTS_SETUP.md` com o histórico de problemas e mudanças no código.*
+*Documento gerado para registrar o trabalho da sessão; complementa [`Documentação/TTS_SETUP.md`](TTS_SETUP.md) com o histórico de problemas e mudanças no código.*

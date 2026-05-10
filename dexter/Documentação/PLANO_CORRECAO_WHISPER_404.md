@@ -20,7 +20,7 @@ Documento para **outro agente ou desenvolvedor** executar as tarefas na ordem su
 - O binário **`whisper-server`** do **whisper.cpp** (`examples/server/server.cpp`) expõe a transcrição em:
   - `POST {request_path}{inference_path}` com **padrão** `inference_path = "/inference"`.
 - O cliente Dexter chama **`/v1/audio/transcriptions`** (formato OpenAI). Se o servidor é o whisper-server padrão, essa rota **não existe** → **HTTP 404**.
-- `WHISPER_STT_SETUP.md` cobre bem o erro **501** (URL apontando para LLM). O **404** é o caso **rota incompatível** no servidor Whisper correto.
+- `Documentação/WHISPER_STT_SETUP.md` cobre bem o erro **501** (URL apontando para LLM). O **404** é o caso **rota incompatível** no servidor Whisper correto.
 
 ---
 
@@ -73,7 +73,7 @@ Assim a URL efetiva fica **`/v1/audio` + `/transcriptions`** = **`/v1/audio/tran
 
 ### Tarefa C — Documentação
 
-**Arquivos:** `dexter/WHISPER_STT_SETUP.md` e, se aplicável, trecho em `dexter/MIGRACAO_WINDOWS.md`
+**Arquivos:** `dexter/Documentação/WHISPER_STT_SETUP.md` e, se aplicável, trecho em `dexter/Documentação/MIGRACAO_WINDOWS.md`
 
 **Ação:**
 
@@ -119,7 +119,7 @@ Assim a URL efetiva fica **`/v1/audio` + `/transcriptions`** = **`/v1/audio/tran
 | Cliente STT | `dexter/src-tauri/src/voice.rs` (`transcribe_audio`) |
 | Launcher | `dexter/start-all.ps1` (bloco Whisper) |
 | Rotas do servidor (referência) | `tools/whisper.cpp/examples/server/server.cpp` (`inference_path`, `Post(...)`) |
-| Doc STT existente | `dexter/WHISPER_STT_SETUP.md` |
+| Doc STT existente | `dexter/Documentação/WHISPER_STT_SETUP.md` |
 
 ---
 

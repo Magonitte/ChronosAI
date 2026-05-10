@@ -44,7 +44,7 @@ Documentação operacional detalhada (instalação, portas, perfis GPU, migraç�
 - Serviços locais típicos (ajuste portas nos **Configurações** do app):
   - LLM: **llama.cpp** `llama-server` (ex.: `http://localhost:8080`)
   - STT: **whisper.cpp** `whisper-server` (ex.: `http://localhost:8081`)
-  - TTS: **Chatterbox** ou modo alternativo conforme [`dexter/TTS_SETUP.md`](dexter/TTS_SETUP.md)
+  - TTS: **Chatterbox** ou modo alternativo conforme [`dexter/Documentação/TTS_SETUP.md`](dexter/Documentação/TTS_SETUP.md)
 - **Node.js**, **Rust**, **Visual Studio Build Tools** (Windows) para compilar o Tauri.
 
 O script **`dexter/start-all.ps1`** ajuda a subir LLM + Whisper + TTS + frontend com perfis (`voice-fast`, `quality`, `voice-chatterbox`, etc.). Caminhos de executáveis e modelos **precisam ser ajustados** no topo do script para a sua máquina.
@@ -71,15 +71,18 @@ npm run tauri build
 
 ---
 
-## Documentação em `dexter/`
+## Documentação em `dexter/Documentação/`
+
+Guias, planos, histórico de sessão e migração ficam em **`dexter/Documentação/`**. O índice principal do app continua em [**`dexter/README.md`**](dexter/README.md).
 
 | Documento | Conteúdo |
 |-----------|----------|
-| [**README.md**](dexter/README.md) | Visão técnica completa do assistente (arquitetura, ferramentas, configuração) |
-| [**MIGRACAO_WINDOWS.md**](dexter/MIGRACAO_WINDOWS.md) | Histórico e detalhes da migração macOS → Windows |
-| [**WHISPER_STT_SETUP.md**](dexter/WHISPER_STT_SETUP.md) | STT / servidor Whisper |
-| [**TTS_SETUP.md**](dexter/TTS_SETUP.md) | Chatterbox e TTS |
-| [**DESKTOP_APP_TOOLS.md**](dexter/DESKTOP_APP_TOOLS.md) | Abrir/fechar apps, mídia e biblioteca local no Windows |
+| [**MIGRACAO_WINDOWS.md**](dexter/Documentação/MIGRACAO_WINDOWS.md) | Histórico e detalhes da migração macOS → Windows |
+| [**WHISPER_STT_SETUP.md**](dexter/Documentação/WHISPER_STT_SETUP.md) | STT / servidor Whisper |
+| [**PLANO_CORRECAO_WHISPER_404.md**](dexter/Documentação/PLANO_CORRECAO_WHISPER_404.md) | Rotas e erros 404 no servidor Whisper |
+| [**TTS_SETUP.md**](dexter/Documentação/TTS_SETUP.md) | Chatterbox e TTS |
+| [**DESKTOP_APP_TOOLS.md**](dexter/Documentação/DESKTOP_APP_TOOLS.md) | Abrir/fechar apps, mídia e biblioteca local no Windows |
+| [**SESSAO_ASSISTENTE_VOZ_PTBR.md**](dexter/Documentação/SESSAO_ASSISTENTE_VOZ_PTBR.md) | Registro de sessão (PT-BR / Chatterbox) |
 
 ---
 
@@ -89,6 +92,8 @@ npm run tauri build
 ChronosAI/
 ├── README.md                 ← você está aqui
 ├── dexter/                   ← aplicativo Voice Assistant (Tauri)
+│   ├── README.md             ← visão técnica do Dexter
+│   ├── Documentação/         ← guias, planos, histórico de sessão
 │   ├── src/                  ← React (Vite)
 │   ├── src-tauri/            ← Rust (core, voz, ferramentas, RAG)
 │   ├── start-all.ps1         ← orquestra servidores locais (Windows)
