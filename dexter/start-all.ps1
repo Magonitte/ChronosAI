@@ -1,16 +1,18 @@
 ﻿# Voice Assistant - Launcher (Windows)
 # Inicia todos os servidores + o assistente com um unico comando.
 #
-# Uso: .\start-all.ps1 [-Profile voice-fast|balanced|quality|voice-chatterbox] [-ForceRestartServices]
-#  voice-chatterbox: menos camadas GPU no LLM (-ngl 28) + Chatterbox TTS em CUDA (clone de voz)
+# Uso: .\start-all.ps1 [-Profile voice-fast|balanced|quality|voice-chatterbox|voice-chatterbox-cpu] [-ForceRestartServices]
+#  Padrao: voice-chatterbox (menos camadas GPU no LLM -ngl 28 + Chatterbox TTS em CUDA / clone de voz)
+#  voice-chatterbox-cpu: Chatterbox em CPU (sem contencao VRAM), LLM com -ngl 99 e contexto 8192
 # Para encerrar: Ctrl+C (mata todos os processos automaticamente)
 
 param(
-    [ValidateSet("voice-fast", "balanced", "quality", "voice-chatterbox")]
-    [string]$Profile = "voice-fast",
+    [ValidateSet("voice-fast", "balanced", "quality", "voice-chatterbox", "voice-chatterbox-cpu")]
+    [string]$Profile = "voice-chatterbox",
     [switch]$ForceRestartServices,
     [switch]$KeepStaleFrontend,
     [switch]$NoWhisper,
+    [switch]$WhisperTiny,
     [switch]$NoTts
 )
 
@@ -31,7 +33,9 @@ $LLM_CPU_MOE  = 33
 # Whisper STT
 $WHISPER_EXE   = "..\build\bin\Release\whisper-server.exe"
 $WHISPER_MODEL = "J:\Modelos LLM\manifests\registry.ollama.ai\library\whisper\ggml-small.bin"
+$WHISPER_MODEL_TINY = "J:\Modelos LLM\manifests\registry.ollama.ai\library\whisper\ggml-tiny.bin"
 $WHISPER_PORT  = 8081
+$WHISPER_THREADS = 4
 
 # Chatterbox TTS (chatterbox-tts-api com modelo multilingual PT-BR)
 $CHATTERBOX_PORT = 8005
@@ -45,7 +49,7 @@ $TTS_HTTP_PROBE_TIMEOUT_SEC = 25
 $APP_DIR = "."  # diretorio do projeto (dexter/)
 $VITE_PORT = 1420
 
-# Perfis de performance. Em RTX 3070 8GB, "voice-fast" deixa mais folga para TTS/desktop.
+# Perfis de performance. Padrao voice-chatterbox; use voice-fast para mais folga VRAM no LLM e TTS Windows nativo.
 $LLM_CONTEXT = 4096
 $LLM_THREADS = 8
 $LLM_USE_MMPROJ = $false
@@ -72,13 +76,27 @@ switch ($Profile) {
     }
     "voice-chatterbox" {
         # Preset para TTS com clone (Chatterbox na GPU): reduz -ngl no LLM e libera VRAM.
+        # P4 — contexto reduzido 16384→8192 (voice nao precisa de 16k tokens).
         $LLM_NGL = 28
-        $LLM_CONTEXT = 16384
-        $LLM_THREADS = 6
+        $LLM_CONTEXT = 8192
+        $LLM_THREADS = 8
         $LLM_USE_MMPROJ = $true
         $LLM_USE_MLOCK = $true
         $LLM_USE_NO_MMAP = $true
         $CHATTERBOX_DEVICE = "cuda"
+        $TTS_MODE = "chatterbox"
+    }
+    "voice-chatterbox-cpu" {
+        # P2+P4 — Chatterbox em CPU elimina contencao de VRAM com LLM.
+        # LLM recebe -ngl 99 (max GPU layers) + contexto 8192 (menos VRAM).
+        # Chatterbox CPU ~2-3x mais lento que GPU, mas sem picos de 19.6s.
+        $LLM_NGL = 99
+        $LLM_CONTEXT = 8192
+        $LLM_THREADS = 8
+        $LLM_USE_MMPROJ = $true
+        $LLM_USE_MLOCK = $true
+        $LLM_USE_NO_MMAP = $true
+        $CHATTERBOX_DEVICE = "cpu"
         $TTS_MODE = "chatterbox"
     }
 }
@@ -348,11 +366,14 @@ if ($llamaOk) {
 if ($NoWhisper) {
     Write-Host "[Whisper] Ignorado por parametro -NoWhisper" -ForegroundColor Yellow
 } elseif (Test-Path $WHISPER_EXE) {
-    if (Test-Path $WHISPER_MODEL) {
-        Start-Server -Name "Whisper" -Exe $WHISPER_EXE -ServerArgs "--model `"$WHISPER_MODEL`" --host 127.0.0.1 --port $WHISPER_PORT --request-path `"/v1/audio`" --inference-path `"/transcriptions`"" -Port $WHISPER_PORT -Priority "BelowNormal"
+    $whisperModelPath = if ($WhisperTiny) { $WHISPER_MODEL_TINY } else { $WHISPER_MODEL }
+    $whisperModelName = if ($WhisperTiny) { "tiny" } else { "small" }
+    if (Test-Path $whisperModelPath) {
+        Write-Host "[Whisper] Modelo: $whisperModelName | threads: $WHISPER_THREADS" -ForegroundColor Gray
+        Start-Server -Name "Whisper" -Exe $WHISPER_EXE -ServerArgs "--model `"$whisperModelPath`" --host 127.0.0.1 --port $WHISPER_PORT --request-path `"/v1/audio`" --inference-path `"/transcriptions`" -t $WHISPER_THREADS" -Port $WHISPER_PORT -Priority "BelowNormal"
     } else {
-        Write-Host "[Whisper] Modelo nao encontrado em: $WHISPER_MODEL" -ForegroundColor Red
-        Write-Host "[Whisper] Baixe de: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin" -ForegroundColor Gray
+        Write-Host "[Whisper] Modelo nao encontrado em: $whisperModelPath" -ForegroundColor Red
+        Write-Host "[Whisper] Baixe de: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${whisperModelName}.bin" -ForegroundColor Gray
     }
 } else {
     Write-Host "[Whisper] whisper-server.exe nao encontrado em: $WHISPER_EXE" -ForegroundColor Yellow
@@ -433,7 +454,7 @@ if ($NoTts) {
                 -ArgumentList "main.py" `
                 -WorkingDirectory $CHATTERBOX_DIR `
                 -NoNewWindow -PassThru
-            try { $ttsProc.PriorityClass = "BelowNormal" } catch { }
+            try { $ttsProc.PriorityClass = "High" } catch { }
         } else {
             Write-Host "[TTS] venv nao encontrado. Execute .\setup-tts.ps1 primeiro." -ForegroundColor Red
             $ttsProc = $null

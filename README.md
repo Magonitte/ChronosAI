@@ -51,6 +51,27 @@ O script **`dexter/start-all.ps1`** ajuda a subir LLM + Whisper + TTS + frontend
 
 ---
 
+## Performance (pipeline de voz)
+
+Métricas coletadas com RTX 3070 8 GB, Gemma 4 26B, Chatterbox Turbo, Whisper small.
+
+| Métrica | Baseline | Otimizado | Melhoria |
+|---|---|---|---|
+| TTFA médio (K1) | 19.3s | **13.0s** | **-33%** |
+| TTS chunk 0 médio | 10.6s | **8.0s** | **-25%** |
+| Token rate LLM (K7) | 6.5 tok/s | **10.1 tok/s** | **+55%** |
+| Respostas vazias | 25% (1/4) | **0% (4/4)** | **100%** |
+
+A otimização completa incluiu:
+- **`thinking_budget_tokens=256`** — força o Gemma 4 a encerrar o raciocínio e entregar resposta visível
+- **`max_tokens=600`** — espaço para reasoning + conteúdo (era 220)
+- **`CFM_TIMESTEPS=2`** — Chatterbox Turbo, ~5x mais rápido na conversão speech token → áudio
+- **Contexto LLM reduzido** de 16384 para 8192 — token rate 3.2x maior sem perda perceptível de coerência
+
+Perfil recomendado: **`voice-chatterbox`** (Chatterbox GPU + Turbo). Consulte [`dexter/Documentação/`](dexter/Documentação/) para relatórios detalhados.
+
+---
+
 ## Início rápido
 
 ```powershell

@@ -28,6 +28,51 @@ class InitializationState(Enum):
     ERROR = "error"
 
 
+def _patch_model_generate(model, is_multilingual: bool):
+    """
+    Monkey-patch the model to use configurable max_new_tokens, repetition_penalty,
+    and S3Gen n_cfm_timesteps (Turbo mode).
+    The upstream chatterbox library hardcodes max_new_tokens=1000 with a TODO to
+    make it configurable. We patch t3.inference to pick up our values.
+    """
+    max_tokens = Config.MAX_SPEECH_TOKENS
+    rep_penalty = Config.REPETITION_PENALTY
+    min_p = Config.MIN_P
+    top_p = Config.TOP_P
+    cfm_timesteps = Config.CFM_TIMESTEPS
+    
+    original_t3_inference = model.t3.inference
+    
+    def patched_t3_inference(*args, **kwargs):
+        kwargs.setdefault('max_new_tokens', max_tokens)
+        kwargs.setdefault('repetition_penalty', rep_penalty)
+        kwargs.setdefault('min_p', min_p)
+        kwargs.setdefault('top_p', top_p)
+        return original_t3_inference(*args, **kwargs)
+    
+    model.t3.inference = patched_t3_inference
+    
+    # --- Patch S3Gen for Turbo mode (n_cfm_timesteps) ---
+    s3gen_patched = False
+    for attr_name in ('s3gen', 's3_gen', 'decoder', 'audio_decoder'):
+        s3gen = getattr(model, attr_name, None)
+        if s3gen is not None and hasattr(s3gen, 'n_cfm_timesteps'):
+            original_n_cfm = s3gen.n_cfm_timesteps
+            s3gen.n_cfm_timesteps = cfm_timesteps
+            s3gen_patched = True
+            print(f"[perf-config] S3Gen.{attr_name}.n_cfm_timesteps: {original_n_cfm} → {cfm_timesteps} "
+                  f"({'TURBO' if cfm_timesteps <= 2 else 'default'})")
+            break
+    
+    if not s3gen_patched:
+        print(f"[perf-config] S3Gen n_cfm_timesteps not found (cfm_timesteps={cfm_timesteps} ignored)")
+    
+    print(f"[perf-config] max_speech_tokens={max_tokens} | rep_penalty={rep_penalty} | "
+          f"min_p={min_p} | top_p={top_p} | cfm_timesteps={cfm_timesteps}")
+    
+    return model
+
+
 async def initialize_model():
     """Initialize the Chatterbox TTS model"""
     global _model, _device, _initialization_state, _initialization_error, _initialization_progress, _is_multilingual, _supported_languages
@@ -96,6 +141,9 @@ async def initialize_model():
             _is_multilingual = False
             _supported_languages = {"en": "English"}
             print(f"[OK] Standard model initialized (English only)")
+        
+        # Apply performance monkey-patch for configurable max_new_tokens
+        _model = _patch_model_generate(_model, _is_multilingual)
         
         _initialization_state = InitializationState.READY.value
         _initialization_progress = "Model ready"

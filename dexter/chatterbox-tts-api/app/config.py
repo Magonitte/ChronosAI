@@ -22,6 +22,16 @@ class Config:
     CFG_WEIGHT = float(os.getenv('CFG_WEIGHT', 0.5))
     TEMPERATURE = float(os.getenv('TEMPERATURE', 0.8))
     
+    # Speech token generation limits (lower = faster, risk of truncation)
+    MAX_SPEECH_TOKENS = int(os.getenv('MAX_SPEECH_TOKENS', 250))
+    REPETITION_PENALTY = float(os.getenv('REPETITION_PENALTY', 2.0))
+    MIN_P = float(os.getenv('MIN_P', 0.05))
+    TOP_P = float(os.getenv('TOP_P', 1.0))
+    
+    # S3Gen Turbo mode: fewer CFM timesteps = faster speech-token → audio conversion.
+    # Default 10 timesteps; Turbo (2) is ~5x faster with slight quality degradation.
+    CFM_TIMESTEPS = int(os.getenv('CFM_TIMESTEPS', 10))
+    
     # Text processing
     MAX_CHUNK_LENGTH = int(os.getenv('MAX_CHUNK_LENGTH', 280))
     MAX_TOTAL_LENGTH = int(os.getenv('MAX_TOTAL_LENGTH', 3000))
@@ -82,6 +92,14 @@ class Config:
             raise ValueError(f"LONG_TEXT_JOB_RETENTION_DAYS must be positive, got {cls.LONG_TEXT_JOB_RETENTION_DAYS}")
         if cls.LONG_TEXT_MAX_CONCURRENT_JOBS <= 0:
             raise ValueError(f"LONG_TEXT_MAX_CONCURRENT_JOBS must be positive, got {cls.LONG_TEXT_MAX_CONCURRENT_JOBS}")
+        if cls.MAX_SPEECH_TOKENS <= 0:
+            raise ValueError(f"MAX_SPEECH_TOKENS must be positive, got {cls.MAX_SPEECH_TOKENS}")
+        if not (0.1 <= cls.REPETITION_PENALTY <= 5.0):
+            raise ValueError(f"REPETITION_PENALTY must be between 0.1 and 5.0, got {cls.REPETITION_PENALTY}")
+        if not (0.0 <= cls.MIN_P <= 1.0):
+            raise ValueError(f"MIN_P must be between 0.0 and 1.0, got {cls.MIN_P}")
+        if not (0.0 <= cls.TOP_P <= 1.0):
+            raise ValueError(f"TOP_P must be between 0.0 and 1.0, got {cls.TOP_P}")
 
 
 def detect_device():

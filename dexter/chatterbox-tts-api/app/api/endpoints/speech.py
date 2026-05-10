@@ -5,7 +5,9 @@ Text-to-speech endpoint
 import io
 import os
 import asyncio
+import sys
 import tempfile
+import time
 import torch
 import torchaudio as ta
 import base64
@@ -152,6 +154,8 @@ async def generate_speech_internal(
     """Internal function to generate speech with given parameters"""
     global REQUEST_COUNTER
     REQUEST_COUNTER += 1
+    tts_total_start = time.perf_counter()
+    total_inference_ms = 0.0
     
     # Start TTS request tracking
     voice_source = "uploaded file" if voice_sample_path != Config.VOICE_SAMPLE_PATH else "default"
@@ -254,9 +258,17 @@ async def generate_speech_internal(
                 if is_multilingual():
                     generate_kwargs["language_id"] = language_id
                 
+                inference_start = time.perf_counter()
                 audio_tensor = await loop.run_in_executor(
                     None,
                     lambda: model.generate(**generate_kwargs)
+                )
+                inference_ms = (time.perf_counter() - inference_start) * 1000
+                total_inference_ms += inference_ms
+                mel_frames = audio_tensor.shape[-1] if hasattr(audio_tensor, 'shape') else 0
+                print(
+                    f"[perf-tts] inference | input_chars={len(chunk)} | mel_frames={mel_frames} | ms={inference_ms:.0f}",
+                    file=sys.stderr
                 )
                 
                 # Ensure tensor is on the correct device and detached
@@ -291,8 +303,21 @@ async def generate_speech_internal(
         else:
             final_audio_cpu = final_audio
             
+        encoding_start = time.perf_counter()
         ta.save(buffer, final_audio_cpu, model.sr, format="wav")
         buffer.seek(0)
+        encoding_ms = (time.perf_counter() - encoding_start) * 1000
+        wav_bytes = len(buffer.getvalue())
+        print(
+            f"[perf-tts] encoding | wav_bytes={wav_bytes} | ms={encoding_ms:.0f}",
+            file=sys.stderr
+        )
+        
+        total_ms = (time.perf_counter() - tts_total_start) * 1000
+        print(
+            f"[perf-tts] total | ms={total_ms:.0f}",
+            file=sys.stderr
+        )
         
         # Mark as completed
         update_tts_status(request_id, TTSStatus.COMPLETED, "Audio generation completed")

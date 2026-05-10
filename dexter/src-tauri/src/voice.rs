@@ -693,6 +693,7 @@ pub async fn chat_streaming(
     messages: &[ChatMessage],
     tools: &[serde_json::Value],
     sentence_tx: &mpsc::Sender<String>,
+    round: usize,
 ) -> Result<StreamResult, Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
@@ -725,23 +726,24 @@ pub async fn chat_streaming(
         });
     }
 
-    // llama.cpp: thinking_budget_tokens 0 = "immediate end" for the reasoning phase (see --reasoning-budget).
-    // With Gemma / peg-gemma4 that activates reasoning-budget in the server, 0 can truncate the assistant turn
-    // before native tool_calls are emitted — use -1 (server default: unrestricted) so tools still work.
+    // Fix: Gemma 4-style models spend 200-400 tokens in reasoning_content before producing
+    // visible text. A thinking_budget of 0 (unlimited) can consume all tokens. Use 256 to
+    // reserve space for a visible response (~0.5s at 21 tok/s).
     let thinking_budget_tokens = if tools.is_empty() {
-        0
+        256
     } else {
-        -1
+        256
     };
 
     // Short replies for voice when no tools; larger budget when tools are enabled so tool_calls JSON
     // is not truncated. After a tool transcript exists in history, allow a bit more tokens for the final answer.
+    // Bumped to 600 (was 220) to accommodate 200-400 tokens of reasoning + visible response.
     let max_tokens = if !tools.is_empty() {
         1024
     } else if messages.iter().any(|m| m.role == "tool") {
         512
     } else {
-        220
+        600
     };
 
     let request = OpenAIChatRequest {
@@ -755,6 +757,7 @@ pub async fn chat_streaming(
         tools: if tools.is_empty() { None } else { Some(tools.to_vec()) },
     };
 
+    let llm_start = std::time::Instant::now();
     let resp = client
         .post(format!("{}/v1/chat/completions", config.llm_url))
         .json(&request)
@@ -785,6 +788,10 @@ pub async fn chat_streaming(
     let mut xml_buffer = String::new();
     let xml_open_re = regex::Regex::new(r"<(?:\w+:)?tool_call>").unwrap();
     let xml_close_re = regex::Regex::new(r"</(?:\w+:)?tool_call>").unwrap();
+
+    // Perf tracking
+    let mut first_content_token = false;
+    let mut sentence_seq: u32 = 0;
 
     // Buffer for SSE line parsing
     let mut line_buffer = Vec::new();
@@ -865,6 +872,14 @@ pub async fn chat_streaming(
                             // Handle content
                             if let Some(content) = &delta.content {
                                 if !content.is_empty() {
+                                    if !first_content_token {
+                                        first_content_token = true;
+                                        eprintln!(
+                                            "[perf] llm_ttft | round={} | ttft_ms={}",
+                                            round,
+                                            llm_start.elapsed().as_millis()
+                                        );
+                                    }
                                     full_response.push_str(content);
 
                                     if xml_collecting {
@@ -884,6 +899,15 @@ pub async fn chat_streaming(
                                             let m = xml_open_re.find(&sentence_buffer).unwrap();
                                             let before = sentence_buffer[..m.start()].trim().to_string();
                                             if !before.is_empty() {
+                                                let preview: String = before.chars().take(40).collect();
+                                                eprintln!(
+                                                    "[perf] llm_sentence | seq={} | chars={} | elapsed_ms={} | text_preview=\"{}\"",
+                                                    sentence_seq,
+                                                    before.chars().count(),
+                                                    llm_start.elapsed().as_millis(),
+                                                    preview
+                                                );
+                                                sentence_seq += 1;
                                                 spoken_text.push_str(&before);
                                                 spoken_text.push(' ');
                                                 let _ = sentence_tx.send(before).await;
@@ -906,6 +930,15 @@ pub async fn chat_streaming(
                                                 let sentence: String = sentence_buffer.drain(..=split_pos).collect();
                                                 let sentence = sentence.trim().to_string();
                                                 if !sentence.is_empty() {
+                                                    let preview: String = sentence.chars().take(40).collect();
+                                                    eprintln!(
+                                                        "[perf] llm_sentence | seq={} | chars={} | elapsed_ms={} | text_preview=\"{}\"",
+                                                        sentence_seq,
+                                                        sentence.chars().count(),
+                                                        llm_start.elapsed().as_millis(),
+                                                        preview
+                                                    );
+                                                    sentence_seq += 1;
                                                     spoken_text.push_str(&sentence);
                                                     spoken_text.push(' ');
                                                     let _ = sentence_tx.send(sentence).await;
@@ -926,6 +959,15 @@ pub async fn chat_streaming(
     if !xml_collecting {
         let remaining = sentence_buffer.trim().to_string();
         if !remaining.is_empty() {
+            let preview: String = remaining.chars().take(40).collect();
+            eprintln!(
+                "[perf] llm_sentence | seq={} | chars={} | elapsed_ms={} | text_preview=\"{}\"",
+                sentence_seq,
+                remaining.chars().count(),
+                llm_start.elapsed().as_millis(),
+                preview
+            );
+            sentence_seq += 1;
             spoken_text.push_str(&remaining);
             let _ = sentence_tx.send(remaining).await;
         }
@@ -945,6 +987,7 @@ pub async fn chat_streaming(
     }
 
     if !collected_tool_calls.is_empty() {
+        let _ = sentence_seq;
         return Ok(StreamResult::ToolCalls(collected_tool_calls, spoken_text.trim().to_string(), false));
     }
 
@@ -959,11 +1002,13 @@ pub async fn chat_streaming(
     if has_tools && !full_response.is_empty() {
         if let Some(parsed) = parse_xml_tool_calls(&full_response) {
             if !parsed.is_empty() {
+                let _ = sentence_seq;
                 return Ok(StreamResult::ToolCalls(parsed, spoken_text.trim().to_string(), true));
             }
         }
     }
 
+    let _ = sentence_seq;
     Ok(StreamResult::Content(full_response.trim().to_string()))
 }
 
@@ -1074,11 +1119,26 @@ struct ChatterboxRequest {
 pub async fn synthesize(
     config: &VoiceConfig,
     text: &str,
+    seq: u32,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let tts_mode = std::env::var("DEXTER_TTS_MODE").unwrap_or_default();
     if tts_mode.eq_ignore_ascii_case("windows") {
+        eprintln!(
+            "[perf] tts_start | seq={} | chars={} | backend=windows_sapi | text_preview=\"{}\"",
+            seq,
+            text.chars().count(),
+            text.chars().take(40).collect::<String>()
+        );
         return synthesize_windows_sapi(text).await;
     }
+
+    let preview: String = text.chars().take(40).collect();
+    eprintln!(
+        "[perf] tts_start | seq={} | chars={} | backend=chatterbox | text_preview=\"{}\"",
+        seq,
+        text.chars().count(),
+        preview
+    );
 
     // Chatterbox na GPU pode passar de 20s no primeiro chunk (contenda com LLM / JIT CUDA).
     let client = reqwest::Client::builder()
@@ -1092,6 +1152,7 @@ pub async fn synthesize(
         response_format: "wav".to_string(),
     };
 
+    let http_start = std::time::Instant::now();
     let chatterbox_result = client
         .post(format!("{}/v1/audio/speech", config.chatterbox_url))
         .json(&request)
@@ -1099,7 +1160,14 @@ pub async fn synthesize(
         .await;
 
     let resp = match chatterbox_result {
-        Ok(resp) => resp,
+        Ok(resp) => {
+            eprintln!(
+                "[perf] tts_http_ok | seq={} | http_ms={}",
+                seq,
+                http_start.elapsed().as_millis()
+            );
+            resp
+        }
         Err(err) => {
             eprintln!("[TTS] Chatterbox indisponivel, usando Windows TTS: {}", err);
             return synthesize_windows_sapi(text).await;
@@ -1113,8 +1181,23 @@ pub async fn synthesize(
         return synthesize_windows_sapi(text).await;
     }
 
+    let body_start = std::time::Instant::now();
     let audio_bytes = resp.bytes().await?;
-    Ok(STANDARD.encode(&audio_bytes))
+    let body_elapsed = body_start.elapsed();
+    eprintln!(
+        "[perf] tts_body_ok | seq={} | body_ms={} | bytes={}",
+        seq,
+        body_elapsed.as_millis(),
+        audio_bytes.len()
+    );
+
+    let b64 = STANDARD.encode(&audio_bytes);
+    eprintln!(
+        "[perf] tts_done | seq={} | total_ms={}",
+        seq,
+        http_start.elapsed().as_millis()
+    );
+    Ok(b64)
 }
 
 async fn synthesize_windows_sapi(

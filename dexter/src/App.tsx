@@ -600,6 +600,7 @@ function Orb() {
   const totalChunksRef = useRef<number | null>(null);
   const playedCountRef = useRef(0);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const lastChunkEndRef = useRef<number>(0); // perf: track inter-sentence gap
 
   useEffect(() => {
     bubblesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -625,6 +626,7 @@ function Orb() {
     isPlayingRef.current = false;
     totalChunksRef.current = null;
     playedCountRef.current = 0;
+    lastChunkEndRef.current = 0;
   };
 
   const playNext = () => {
@@ -635,16 +637,42 @@ function Orb() {
         setStage("idle");
         totalChunksRef.current = null;
         playedCountRef.current = 0;
+        lastChunkEndRef.current = 0;
       }
       return;
     }
     const next = audioQueueRef.current.shift()!;
+    // Log inter-sentence gap
+    if (lastChunkEndRef.current > 0) {
+      console.log(
+        `[perf] frontend_gap_${next.index} | gap_ms=${(performance.now() - lastChunkEndRef.current).toFixed(1)}`
+      );
+    }
     isPlayingRef.current = true;
     const audio = new Audio(next.url);
     currentAudioRef.current = audio;
-    audio.play().catch(() => {});
-    audio.onended = () => { URL.revokeObjectURL(next.url); currentAudioRef.current = null; isPlayingRef.current = false; playedCountRef.current++; playNext(); };
-    audio.onerror = () => { URL.revokeObjectURL(next.url); currentAudioRef.current = null; isPlayingRef.current = false; playedCountRef.current++; playNext(); };
+    const playStart = performance.now();
+    audio.play().then(() => {
+      const playDelay = performance.now() - playStart;
+      console.log(
+        `[perf] frontend_playback_started_${next.index} | play_delay_ms=${playDelay.toFixed(1)} | duration_s=${audio.duration?.toFixed(2) ?? "N/A"}`
+      );
+    }).catch(() => {});
+    audio.onended = () => {
+      lastChunkEndRef.current = performance.now();
+      URL.revokeObjectURL(next.url);
+      currentAudioRef.current = null;
+      isPlayingRef.current = false;
+      playedCountRef.current++;
+      playNext();
+    };
+    audio.onerror = () => {
+      URL.revokeObjectURL(next.url);
+      currentAudioRef.current = null;
+      isPlayingRef.current = false;
+      playedCountRef.current++;
+      playNext();
+    };
   };
 
   useEffect(() => {
@@ -697,9 +725,12 @@ function Orb() {
   useEffect(() => {
     const unlisten = listen<AudioChunk>("play_audio_chunk", (event) => {
       const { index, audio } = event.payload;
+      const decodeLabel = `[perf] frontend_decode_${index}`;
+      console.time(decodeLabel);
       const audioBytes = Uint8Array.from(atob(audio), (c) => c.charCodeAt(0));
       const audioBlob = new Blob([audioBytes], { type: "audio/wav" });
       const url = URL.createObjectURL(audioBlob);
+      console.timeEnd(decodeLabel);
       audioQueueRef.current.push({ index, url });
       playNext();
     });

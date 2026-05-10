@@ -349,9 +349,18 @@ async fn process_pipeline(
 
     let whisper_url = config.whisper_url.clone();
     let stt_started = std::time::Instant::now();
+    let audio_len_s = samples.len() as f32 / sample_rate as f32;
+    let audio_bytes_approx = samples.len() * 2; // 16-bit mono
     let transcript = voice::transcribe_audio(&whisper_url, &samples, sample_rate).await
         .map_err(|e| format!("Transcription failed: {}", e))?;
-    eprintln!("[perf] STT finished in {:.2}s", stt_started.elapsed().as_secs_f32());
+    let stt_duration = stt_started.elapsed().as_secs_f32();
+    eprintln!(
+        "[perf] stt_done | duration_s={:.2} | audio_len_s={:.2} | rt_factor={:.2} | audio_bytes={}",
+        stt_duration,
+        audio_len_s,
+        stt_duration / audio_len_s.max(0.01),
+        audio_bytes_approx
+    );
 
     if cancel.is_cancelled() { return Err("interrupted".to_string()); }
 
@@ -427,7 +436,7 @@ async fn process_pipeline(
 
                 let result = tokio::select! {
                     _ = cancel_llm.cancelled() => { return Err("interrupted".to_string()); }
-                    r = voice::chat_streaming(&config, &all_msgs, &tools, &sentence_tx) => {
+                    r = voice::chat_streaming(&config, &all_msgs, &tools, &sentence_tx, _round) => {
                         r.map_err(|e| format!("LLM failed: {}", e))?
                     }
                 };
@@ -535,7 +544,7 @@ async fn process_pipeline(
             // Hit max rounds — do one final stream without tools
             if cancel_llm.is_cancelled() { return Err("interrupted".to_string()); }
 
-            let result = voice::chat_streaming(&config, &all_msgs, &[], &sentence_tx)
+            let result = voice::chat_streaming(&config, &all_msgs, &[], &sentence_tx, max_tool_rounds)
                 .await
                 .map_err(|e| format!("LLM failed: {}", e))?;
 
@@ -553,6 +562,12 @@ async fn process_pipeline(
     while let Some(sentence) = sentence_rx.recv().await {
         if cancel.is_cancelled() { break; }
 
+        eprintln!(
+            "[perf] tts_dequeue | seq={} | elapsed_ms={}",
+            sentence_index,
+            pipeline_started.elapsed().as_millis()
+        );
+
         full_text.push_str(&sentence);
         full_text.push(' ');
 
@@ -569,7 +584,7 @@ async fn process_pipeline(
         let tts_started = std::time::Instant::now();
         let tts_result = tokio::select! {
             _ = cancel.cancelled() => { break; }
-            r = voice::synthesize(&config, &sentence) => r
+            r = voice::synthesize(&config, &sentence, sentence_index) => r
         };
 
         match tts_result {
@@ -1058,6 +1073,18 @@ pub fn run() {
                     }
                     ShortcutState::Released => {
                         let _ = app.emit("hotkey_released", ());
+
+                        // Log pipeline start
+                        {
+                            let state = app.state::<AppState>();
+                            let config = state.config.lock().unwrap();
+                            let tts_mode = std::env::var("DEXTER_TTS_MODE").unwrap_or_else(|_| "chatterbox".to_string());
+                            eprintln!(
+                                "[perf] pipeline_start | tts_mode={} | llm_model={}",
+                                tts_mode,
+                                config.llm_model
+                            );
+                        }
 
                         // Stop recording and process
                         let state = app.state::<AppState>();
