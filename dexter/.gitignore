@@ -28,3 +28,6 @@ src-tauri/target/
 src-tauri/gen/schemas/
 
 .claude/persist/
+
+# Notas internas da equipa (planos, migração, sessões — não versionadas)
+Documentação/

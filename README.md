@@ -24,7 +24,7 @@
 | [`dexter/`](dexter/) | Aplicativo **Tauri 2** (Rust + React): captura de voz, STT, chat com LLM, TTS, bandeja do sistema e ferramentas integradas |
 | `tools/whisper.cpp` | Árvore do **whisper.cpp** (servidor de transcrição, quando você compila localmente) |
 
-Documentação operacional detalhada (instalação, portas, perfis GPU, migração Windows) está em **`dexter/`** — comece por [**`dexter/README.md`**](dexter/README.md).
+Visão técnica do app está em [**`dexter/README.md`**](dexter/README.md).
 
 ---
 
@@ -44,7 +44,7 @@ Documentação operacional detalhada (instalação, portas, perfis GPU, migraç�
 - Serviços locais típicos (ajuste portas nos **Configurações** do app):
   - LLM: **llama.cpp** `llama-server` (ex.: `http://localhost:8080`)
   - STT: **whisper.cpp** `whisper-server` (ex.: `http://localhost:8081`)
-  - TTS: **Chatterbox** ou modo alternativo conforme [`dexter/Documentação/TTS_SETUP.md`](dexter/Documentação/TTS_SETUP.md)
+  - TTS: **Chatterbox** (ou modo configurado no `start-all.ps1`) — ver também `dexter/chatterbox-tts-api/`
 - **Node.js**, **Rust**, **Visual Studio Build Tools** (Windows) para compilar o Tauri.
 
 O script **`dexter/start-all.ps1`** ajuda a subir LLM + Whisper + TTS + frontend com perfis (`voice-fast`, `quality`, `voice-chatterbox`, etc.). Caminhos de executáveis e modelos **precisam ser ajustados** no topo do script para a sua máquina.
@@ -71,18 +71,9 @@ npm run tauri build
 
 ---
 
-## Documentação em `dexter/Documentação/`
+## Documentação interna (não vai para o GitHub)
 
-Guias, planos, histórico de sessão e migração ficam em **`dexter/Documentação/`**. O índice principal do app continua em [**`dexter/README.md`**](dexter/README.md).
-
-| Documento | Conteúdo |
-|-----------|----------|
-| [**MIGRACAO_WINDOWS.md**](dexter/Documentação/MIGRACAO_WINDOWS.md) | Histórico e detalhes da migração macOS → Windows |
-| [**WHISPER_STT_SETUP.md**](dexter/Documentação/WHISPER_STT_SETUP.md) | STT / servidor Whisper |
-| [**PLANO_CORRECAO_WHISPER_404.md**](dexter/Documentação/PLANO_CORRECAO_WHISPER_404.md) | Rotas e erros 404 no servidor Whisper |
-| [**TTS_SETUP.md**](dexter/Documentação/TTS_SETUP.md) | Chatterbox e TTS |
-| [**DESKTOP_APP_TOOLS.md**](dexter/Documentação/DESKTOP_APP_TOOLS.md) | Abrir/fechar apps, mídia e biblioteca local no Windows |
-| [**SESSAO_ASSISTENTE_VOZ_PTBR.md**](dexter/Documentação/SESSAO_ASSISTENTE_VOZ_PTBR.md) | Registro de sessão (PT-BR / Chatterbox) |
+Planos, histórico de sessão, guias de troubleshooting e notas de migração podem ficar na pasta local **`dexter/Documentação/`**, listada no `.gitignore` — serve só para quem desenvolve no próprio disco; o repositório público mantém o código e os README principais.
 
 ---
 
@@ -93,7 +84,6 @@ ChronosAI/
 ├── README.md                 ← você está aqui
 ├── dexter/                   ← aplicativo Voice Assistant (Tauri)
 │   ├── README.md             ← visão técnica do Dexter
-│   ├── Documentação/         ← guias, planos, histórico de sessão
 │   ├── src/                  ← React (Vite)
 │   ├── src-tauri/            ← Rust (core, voz, ferramentas, RAG)
 │   ├── start-all.ps1         ← orquestra servidores locais (Windows)

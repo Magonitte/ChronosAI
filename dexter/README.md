@@ -4,7 +4,7 @@ Assistente de voz **local** e focado em privacidade: você segura uma tecla de a
 
 Implementação em **Tauri 2** (Rust no backend, **React 19** na interface).
 
-Guias de setup, migração Windows, planos de correção e histórico de sessão estão em **`Documentação/`** (mesmo nível que esta pasta).
+Opcionalmente você pode manter notas da equipa em **`Documentação/`** ao lado desta pasta (gitignored — não aparece no GitHub).
 
 ---
 
@@ -48,7 +48,7 @@ O app fica na **bandeja do sistema**; a janela transparente com o orb não preci
 
 ### STT no Windows
 
-No **Windows**, a transcrição usa um servidor **whisper.cpp** (HTTP), compatível com rotas estilo OpenAI — não há mais STT embutido via `whisper-rs` neste alvo (ver [**MIGRACAO_WINDOWS.md**](Documentação/MIGRACAO_WINDOWS.md)).
+No **Windows**, a transcrição usa um servidor **whisper.cpp** (HTTP), compatível com rotas estilo OpenAI — não há mais STT embutido via `whisper-rs` neste alvo.
 
 ### TTS em fluxo
 
@@ -83,7 +83,7 @@ As ferramentas são expostas ao modelo em JSON (funções). Você liga ou deslig
 | **native_music_library_shuffle_play** | Biblioteca inteira em modo aleatório via Reprodutor do Windows (rápido, sem varrer disco). |
 | **play_full_local_music_library** | Varredura pesada / export M3U grande — só com pedido explícito do usuário. |
 
-Detalhes de apps, mídia e whitelist: [**DESKTOP_APP_TOOLS.md**](Documentação/DESKTOP_APP_TOOLS.md).
+Políticas de apps e mídia estão implementadas em **`src-tauri/src/tools.rs`** e **`media_controls.rs`**.
 
 ### Screenshot + visão
 
@@ -152,12 +152,7 @@ O ficheiro de configuração no Windows fica em:
 - Servidores em execução **antes** de usar voz de ponta a ponta:
   - **llama.cpp** `llama-server` com modelo GGUF.
   - **whisper.cpp** `whisper-server` com modelo compatível.
-  - **Chatterbox** (ou outro servidor OpenAI-compatible `/v1/audio/speech`) conforme [**TTS_SETUP.md**](Documentação/TTS_SETUP.md).
-
-Guias adicionais:
-
-- [**WHISPER_STT_SETUP.md**](Documentação/WHISPER_STT_SETUP.md)
-- [**PLANO_CORRECAO_WHISPER_404.md**](Documentação/PLANO_CORRECAO_WHISPER_404.md) — rotas e erros 404 no Whisper server.
+  - **Chatterbox** (ou outro servidor OpenAI-compatible `/v1/audio/speech`) — ver **`chatterbox-tts-api/README.md`** e **`start-all.ps1`**.
 
 ---
 
