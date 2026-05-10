@@ -4,8 +4,6 @@ Assistente de voz **local** e focado em privacidade: você segura uma tecla de a
 
 Implementação em **Tauri 2** (Rust no backend, **React 19** na interface).
 
-Opcionalmente você pode manter notas da equipa em **`Documentação/`** ao lado desta pasta (gitignored — não aparece no GitHub).
-
 ---
 
 ## Fluxo resumido
@@ -167,8 +165,8 @@ npm run tauri build  # instalador / artefatos de release
 ### Um comando para subir serviços (Windows)
 
 ```powershell
-.\start-all.ps1 -Profile voice-fast
-# Perfis: voice-fast | balanced | quality | voice-chatterbox
+.\start-all.ps1
+# Perfis: padrao voice-chatterbox | voice-fast | balanced | quality
 ```
 
 Edite variáveis no topo do script (`start-all.ps1`): caminhos para `llama-server`, `whisper-server`, modelos e pastas do Chatterbox.

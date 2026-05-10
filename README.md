@@ -47,7 +47,7 @@ Visão técnica do app está em [**`dexter/README.md`**](dexter/README.md).
   - TTS: **Chatterbox** (ou modo configurado no `start-all.ps1`) — ver também `dexter/chatterbox-tts-api/`
 - **Node.js**, **Rust**, **Visual Studio Build Tools** (Windows) para compilar o Tauri.
 
-O script **`dexter/start-all.ps1`** ajuda a subir LLM + Whisper + TTS + frontend com perfis (`voice-fast`, `quality`, `voice-chatterbox`, etc.). Caminhos de executáveis e modelos **precisam ser ajustados** no topo do script para a sua máquina.
+O script **`dexter/start-all.ps1`** ajuda a subir LLM + Whisper + TTS + frontend (perfil **padrão: `voice-chatterbox`**; outros: `voice-fast`, `balanced`, `quality`). Caminhos de executáveis e modelos **precisam ser ajustados** no topo do script para a sua máquina.
 
 ---
 
@@ -58,7 +58,7 @@ git clone https://github.com/Magonitte/ChronosAI.git
 cd ChronosAI\dexter
 npm install
 # Configure start-all.ps1 (modelos, caminhos). Depois:
-.\start-all.ps1 -Profile voice-fast
+.\start-all.ps1
 # Em outro terminal, com os serviços no ar:
 npm run tauri dev
 ```
@@ -68,12 +68,6 @@ Build de produção:
 ```powershell
 npm run tauri build
 ```
-
----
-
-## Documentação interna (não vai para o GitHub)
-
-Planos, histórico de sessão, guias de troubleshooting e notas de migração podem ficar na pasta local **`dexter/Documentação/`**, listada no `.gitignore` — serve só para quem desenvolve no próprio disco; o repositório público mantém o código e os README principais.
 
 ---
 
