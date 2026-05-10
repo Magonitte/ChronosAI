@@ -1,3 +1,4 @@
+use regex::Regex;
 use std::collections::HashSet;
 use std::io::Write;
 use std::process::Command;
@@ -201,6 +202,27 @@ impl AuditLog {
             let _ = f.write_all(entry.as_bytes());
         }
     }
+}
+
+/// Map common LLM mistakes to real Windows inbox executable names. Sandbox PATH only includes
+/// System32 etc.; there is `mspaint.exe`, not `paint.exe`.
+fn normalize_windows_launch_command(command: &str) -> String {
+    let trimmed = command.trim();
+    let mut out = trimmed.to_string();
+
+    if let Ok(re) = Regex::new(r"(?i)(Start-Process\s+)paint(\s|$|;|\)|&)") {
+        out = re.replace_all(&out, "${1}mspaint$2").into_owned();
+    }
+    if let Ok(re) = Regex::new(r"(?i)(\s-Name\s+)paint(\s|$|;|\)|&)") {
+        out = re.replace_all(&out, "${1}mspaint$2").into_owned();
+    }
+
+    let t = out.trim();
+    if t.eq_ignore_ascii_case("paint") || t.eq_ignore_ascii_case("paint.exe") {
+        return "Start-Process mspaint".to_string();
+    }
+
+    out
 }
 
 /// Validate a command against the blocklist. Returns Err with reason if blocked.
@@ -441,27 +463,50 @@ fn format_output(output: &std::process::Output) -> Result<String, String> {
 
 /// The main entry point — validate, execute, and audit.
 pub fn execute(command: &str, config: &SandboxConfig, audit: &Mutex<AuditLog>) -> Result<String, String> {
+    let command = normalize_windows_launch_command(command);
+
     // Validate first
-    if let Err(reason) = validate_command(command) {
+    if let Err(reason) = validate_command(&command) {
         if let Ok(log) = audit.lock() {
-            log.log(command, &reason, true);
+            log.log(&command, &reason, true);
         }
         return Err(reason);
     }
 
     // Execute based on mode
     let result = match config.mode {
-        SandboxMode::Guarded => run_guarded(command, config),
-        SandboxMode::Docker => run_docker(command, config),
+        SandboxMode::Guarded => run_guarded(&command, config),
+        SandboxMode::Docker => run_docker(&command, config),
     };
 
     // Audit
     if let Ok(log) = audit.lock() {
         match &result {
-            Ok(output) => log.log(command, output, false),
-            Err(e) => log.log(command, e, false),
+            Ok(output) => log.log(&command, output, false),
+            Err(e) => log.log(&command, e, false),
         }
     }
 
     result
+}
+
+#[cfg(test)]
+mod normalize_tests {
+    use super::normalize_windows_launch_command;
+
+    #[test]
+    fn start_process_paint_becomes_mspaint() {
+        assert_eq!(
+            normalize_windows_launch_command("Start-Process paint"),
+            "Start-Process mspaint"
+        );
+    }
+
+    #[test]
+    fn bare_paint_becomes_start_mspaint() {
+        assert_eq!(
+            normalize_windows_launch_command("  paint.exe  "),
+            "Start-Process mspaint"
+        );
+    }
 }

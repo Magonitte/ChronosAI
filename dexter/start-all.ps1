@@ -1,11 +1,12 @@
 ﻿# Voice Assistant - Launcher (Windows)
 # Inicia todos os servidores + o assistente com um unico comando.
 #
-# Uso: .\start-all.ps1 [-Profile voice-fast|balanced|quality] [-ForceRestartServices]
+# Uso: .\start-all.ps1 [-Profile voice-fast|balanced|quality|voice-chatterbox] [-ForceRestartServices]
+#  voice-chatterbox: menos camadas GPU no LLM (-ngl 28) + Chatterbox TTS em CUDA (clone de voz)
 # Para encerrar: Ctrl+C (mata todos os processos automaticamente)
 
 param(
-    [ValidateSet("voice-fast", "balanced", "quality")]
+    [ValidateSet("voice-fast", "balanced", "quality", "voice-chatterbox")]
     [string]$Profile = "voice-fast",
     [switch]$ForceRestartServices,
     [switch]$KeepStaleFrontend,
@@ -37,6 +38,8 @@ $CHATTERBOX_PORT = 8005
 $CHATTERBOX_VOICE = "dexter-ptbr"
 $CHATTERBOX_DIR = Join-Path $PSScriptRoot "chatterbox-tts-api"
 $CHATTERBOX_USE_UV = $true  # uv e mais rapido; mude para $false se usar pip/venv
+# Probe HTTP para /voices: com 2s o check falha sob carga (llama carregando + CUDA), gerando falso "120s".
+$TTS_HTTP_PROBE_TIMEOUT_SEC = 25
 
 # Voice Assistant
 $APP_DIR = "."  # diretorio do projeto (dexter/)
@@ -59,6 +62,17 @@ switch ($Profile) {
         $TTS_MODE = "windows"
     }
     "quality" {
+        $LLM_CONTEXT = 16384
+        $LLM_THREADS = 6
+        $LLM_USE_MMPROJ = $true
+        $LLM_USE_MLOCK = $true
+        $LLM_USE_NO_MMAP = $true
+        $CHATTERBOX_DEVICE = "cuda"
+        $TTS_MODE = "chatterbox"
+    }
+    "voice-chatterbox" {
+        # Preset para TTS com clone (Chatterbox na GPU): reduz -ngl no LLM e libera VRAM.
+        $LLM_NGL = 28
         $LLM_CONTEXT = 16384
         $LLM_THREADS = 6
         $LLM_USE_MMPROJ = $true
@@ -275,7 +289,7 @@ Write-Host @"
 ╚════════════════════════════════════════════════╝
 
 "@ -ForegroundColor Magenta
-Write-Host "[Config] Perfil: $Profile | contexto LLM: $LLM_CONTEXT | threads: $LLM_THREADS | mmproj: $LLM_USE_MMPROJ | TTS: $TTS_MODE" -ForegroundColor Gray
+Write-Host "[Config] Perfil: $Profile | contexto LLM: $LLM_CONTEXT | threads: $LLM_THREADS | ngl: $LLM_NGL | mmproj: $LLM_USE_MMPROJ | TTS: $TTS_MODE" -ForegroundColor Gray
 $env:DEXTER_TTS_MODE = $TTS_MODE
 
 # Verificar pre-requisitos
@@ -374,7 +388,7 @@ if ($NoTts) {
     $ttsReadyUrl = "http://localhost:$CHATTERBOX_PORT/voices"
     $existingTtsProcesses = Get-ChatterboxProcesses
 
-    if (Test-HttpReady -Url $ttsReadyUrl) {
+    if (Test-HttpReady -Url $ttsReadyUrl -TimeoutSec $TTS_HTTP_PROBE_TIMEOUT_SEC) {
         Write-Host "[TTS] Chatterbox ja esta rodando na porta $CHATTERBOX_PORT" -ForegroundColor Green
     } elseif ($existingTtsProcesses.Count -gt 0 -or (Get-PortListeners -Port $CHATTERBOX_PORT).Count -gt 0) {
         $owners = $existingTtsProcesses | ForEach-Object { "PID $($_.ProcessId)" }
@@ -386,7 +400,7 @@ if ($NoTts) {
 
         $ttsTimeout = 60
         $ttsElapsed = 0
-        while ($ttsElapsed -lt $ttsTimeout -and -not (Test-HttpReady -Url $ttsReadyUrl)) {
+        while ($ttsElapsed -lt $ttsTimeout -and -not (Test-HttpReady -Url $ttsReadyUrl -TimeoutSec $TTS_HTTP_PROBE_TIMEOUT_SEC)) {
             Start-Sleep -Seconds 2
             $ttsElapsed += 2
             if ($ttsElapsed % 10 -eq 0) {
@@ -394,7 +408,7 @@ if ($NoTts) {
             }
         }
 
-        if (Test-HttpReady -Url $ttsReadyUrl) {
+        if (Test-HttpReady -Url $ttsReadyUrl -TimeoutSec $TTS_HTTP_PROBE_TIMEOUT_SEC) {
             Write-Host "[TTS] Chatterbox pronto na porta $CHATTERBOX_PORT" -ForegroundColor Green
         } else {
             Write-Host "[TTS] AVISO: processo/porta existente nao respondeu em ${ttsTimeout}s." -ForegroundColor Yellow
@@ -409,7 +423,7 @@ if ($NoTts) {
         }
     }
 
-    if (-not (Test-HttpReady -Url $ttsReadyUrl) -and $existingTtsProcesses.Count -eq 0) {
+    if (-not (Test-HttpReady -Url $ttsReadyUrl -TimeoutSec $TTS_HTTP_PROBE_TIMEOUT_SEC) -and $existingTtsProcesses.Count -eq 0) {
         Write-Host "[TTS] Iniciando Chatterbox TTS (multilingual PT-BR)..." -ForegroundColor Cyan
         
         $env:PYTHONIOENCODING = "utf-8"
@@ -433,7 +447,7 @@ if ($NoTts) {
             $ttsTimeout = 120
             $ttsElapsed = 0
             while ($ttsElapsed -lt $ttsTimeout) {
-                if (Test-HttpReady -Url $ttsReadyUrl) {
+                if (Test-HttpReady -Url $ttsReadyUrl -TimeoutSec $TTS_HTTP_PROBE_TIMEOUT_SEC) {
                     Write-Host "[TTS] Chatterbox pronto na porta $CHATTERBOX_PORT" -ForegroundColor Green
                     break
                 }

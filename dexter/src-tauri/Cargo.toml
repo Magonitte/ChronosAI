@@ -28,6 +28,7 @@ tokio-stream = "0.1"
 base64 = "0.22"
 tokio = { version = "1", features = ["full"] }
 tauri-plugin-autostart = "2.5.1"
+tauri-plugin-dialog = "2"
 
 hound = "3.5"
 cpal = "0.15"
@@ -35,6 +36,18 @@ dirs = "5"
 rusqlite = { version = "0.31", features = ["bundled"] }
 chrono = "0.4"
 regex = "1"
+urlencoding = "2"
 tokio-util = { version = "0.7", features = ["rt"] }
 image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
 futures = "0.3"
+walkdir = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Media_Control",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }

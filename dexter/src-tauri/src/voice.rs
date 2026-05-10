@@ -409,7 +409,7 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
             "type": "function",
             "function": {
                 "name": "open_url",
-                "description": "Open a URL in the user's default web browser. Use when the user asks to open a website, search something on the web, or navigate to a URL.",
+                "description": "Open a URL in the user's default web browser. Do NOT use YouTube or Spotify links to play a song BY NAME when play_music_query is available — that tool searches local files first. Use open_url for generic websites, docs, maps, etc.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -477,7 +477,7 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
             "type": "function",
             "function": {
                 "name": "run_command",
-                "description": "Execute a shell command on the user's PC and return its output. Use when the user asks to check system status, manage files, run scripts, install something, or perform any task that requires terminal access.",
+                "description": "Execute a PowerShell command on the user's PC and return output. For opening or closing the predefined desktop apps (Cursor, VS Code, Terminal, browsers, Office, etc.), prefer launch_desktop_app or close_desktop_app. For playing a song BY NAME use play_music_query; for whole-library shuffle use native_music_library_shuffle_play (no disk scan); for artist-scoped multi-track M3U use play_local_music_playlist only when that scope applies; NEVER use play_full_local_music_library unless the user explicitly asked for a giant exported M3U file (requires explicit_m3u_export_request true). For music or video play/pause/skip/volume on what is already playing, prefer control_media_playback and adjust_system_volume instead of simulating keys via PowerShell.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -487,6 +487,188 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
                         }
                     },
                     "required": ["command"]
+                }
+            }
+        }));
+    }
+
+    if tools_config.launch_desktop_app {
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "launch_desktop_app",
+                "description": "Open a predefined desktop application on Windows. Prefer this over run_command when the user asks to open Cursor, VS Code, Windows Terminal, Chrome, Edge, Discord, OBS, Snipping Tool, Groove/media player, Excel, Word, PowerPoint, or Outlook. To close those apps, use close_desktop_app.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "app": {
+                            "type": "string",
+                            "enum": [
+                                "cursor",
+                                "vscode",
+                                "terminal",
+                                "chrome",
+                                "edge",
+                                "discord",
+                                "obs",
+                                "snipping_tool",
+                                "media_player",
+                                "groove",
+                                "excel",
+                                "word",
+                                "powerpoint",
+                                "outlook"
+                            ],
+                            "description": "Application id: cursor; vscode (VS Code); terminal (Windows Terminal); chrome; edge; discord; obs (OBS Studio); snipping_tool (capture tool); media_player or groove (Groove Music); excel; word; powerpoint; outlook."
+                        }
+                    },
+                    "required": ["app"]
+                }
+            }
+        }));
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "close_desktop_app",
+                "description": "Close (quit) a predefined desktop application on Windows by stopping its main process. Same app ids as launch_desktop_app. Prefer this over run_command when the user asks to close or kill those apps.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "app": {
+                            "type": "string",
+                            "enum": [
+                                "cursor",
+                                "vscode",
+                                "terminal",
+                                "chrome",
+                                "edge",
+                                "discord",
+                                "obs",
+                                "snipping_tool",
+                                "media_player",
+                                "groove",
+                                "excel",
+                                "word",
+                                "powerpoint",
+                                "outlook"
+                            ],
+                            "description": "Same ids as launch_desktop_app."
+                        }
+                    },
+                    "required": ["app"]
+                }
+            }
+        }));
+    }
+
+    if tools_config.media_controls {
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "control_media_playback",
+                "description": "Control whatever Windows considers the active media session (Groove Music is preferred when multiple sessions exist). CANNOT play a song BY TITLE alone — for named tracks use play_music_query first. For ALL tracks by an artist as an M3U use play_local_music_playlist (not whole-PC library). For shuffle-all / entire library use native_music_library_shuffle_play only (fast, uses Media Player UI). play_full_local_music_library only if user explicitly wants a scanned giant M3U export (explicit_m3u_export_request true). flow: (1) Specific song → play_music_query. (2) Artist-scoped playlist file → play_local_music_playlist. (3) Whole library → native_music_library_shuffle_play. (4) Explicit M3U export → play_full_local_music_library. (5) Otherwise launch_desktop_app groove/media_player or open_url THEN control_media_playback play or toggle. status shows title and artist when available.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["play", "pause", "toggle", "next", "previous", "stop", "status"],
+                            "description": "play: resume or start if the app supports it (often needs YouTube or Spotify already open); pause; toggle; next/previous; stop; status: now playing"
+                        }
+                    },
+                    "required": ["action"]
+                }
+            }
+        }));
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "adjust_system_volume",
+                "description": "Adjust Windows master volume using multimedia keys. Use when the user asks to raise, lower, or mute/unmute system volume (not in-app volume sliders). Each step is one volume-key press (~2% per step on typical setups).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["up", "down", "mute_toggle"],
+                            "description": "up: volume up; down: volume down; mute_toggle: mute/unmute"
+                        },
+                        "steps": {
+                            "type": "integer",
+                            "description": "For up/down only: how many key presses (default 3, max 50)"
+                        }
+                    },
+                    "required": ["action"]
+                }
+            }
+        }));
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "play_music_query",
+                "description": "Play a song by title (optional artist). ALWAYS use this when the user names a track — never open_url to YouTube for that. Step 1: full scan of the Windows Music library folder ([Environment]::MyMusic / pasta Música do perfil, OneDrive Music, Public Music), paths from Dexter Settings (Pastas de música), DEXTER_MUSIC_PATHS env, up to 200k entries per root, matching folder + file names. Step 2: scan Downloads/Documents/Desktop with a smaller limit. Step 3: YouTube only if still no match.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Song title (required), e.g. After Insanity"
+                        },
+                        "artist": {
+                            "type": "string",
+                            "description": "Optional artist or band to narrow results"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }));
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "play_local_music_playlist",
+                "description": "Writes an M3U and opens it — use ONLY when the user clearly wants multiple local tracks scoped by artist/folder keywords (e.g. «playlist do Metallica», «todas as músicas do Linkin Park»). Same matching rules as play_music_query (words in paths/filenames). NEVER use for «whole PC library», «all my music», shuffle-everything — those MUST use native_music_library_shuffle_play (player built-in «Ordem aleatoria e reproduzir»). Whole-library phrases passed here are auto-redirected to native shuffle. Not for streaming.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "artist": {
+                            "type": "string",
+                            "description": "Artist or band name as in your folders/filenames, e.g. Linkin Park"
+                        }
+                    },
+                    "required": ["artist"]
+                }
+            }
+        }));
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "play_full_local_music_library",
+                "description": "DISABLED unless explicit export: SLOW — full disk scan building a giant M3U. Call ONLY when the user verbatim asked to create/export a large playlist file, M3U from disk scan, or list every audio path (e.g. for VLC with a file). For normal playback or shuffle of their whole library you MUST use native_music_library_shuffle_play instead (no scan). You must pass explicit_m3u_export_request true or the tool refuses. Track cap: DEXTER_MUSIC_FULL_PLAYLIST_MAX.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "explicit_m3u_export_request": {
+                            "type": "boolean",
+                            "description": "Must be true. Set true ONLY when the user explicitly requested exporting/creating a giant M3U via disk scan — never for ordinary «play all my music»."
+                        },
+                        "include_downloads_documents": {
+                            "type": "boolean",
+                            "description": "If true or omitted, after scanning main Music folders also scan Downloads, Videos, Documents, Desktop, and OneDrive Documents for audio. If false, only Music library + DEXTER_MUSIC_PATHS."
+                        }
+                    },
+                    "required": ["explicit_m3u_export_request"]
+                }
+            }
+        }));
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "native_music_library_shuffle_play",
+                "description": "FAST — preferred for whole-library playback: opens Windows Media Player / Groove (no disk scan, no M3U), then UI Automation clicks Music Library and the shuffle-all button whose visible label is «Ordem aleatoria e reproduzir» (Portuguese UI; often without accent on aleatoria). Uses the player's indexed library. If automation fails, user taps once. NOT for one song (play_music_query), NOT artist-scoped M3U (play_local_music_playlist), NOT giant scanned export — that requires play_full_local_music_library with explicit_m3u_export_request true.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
                 }
             }
         }));
@@ -543,14 +725,33 @@ pub async fn chat_streaming(
         });
     }
 
+    // llama.cpp: thinking_budget_tokens 0 = "immediate end" for the reasoning phase (see --reasoning-budget).
+    // With Gemma / peg-gemma4 that activates reasoning-budget in the server, 0 can truncate the assistant turn
+    // before native tool_calls are emitted — use -1 (server default: unrestricted) so tools still work.
+    let thinking_budget_tokens = if tools.is_empty() {
+        0
+    } else {
+        -1
+    };
+
+    // Short replies for voice when no tools; larger budget when tools are enabled so tool_calls JSON
+    // is not truncated. After a tool transcript exists in history, allow a bit more tokens for the final answer.
+    let max_tokens = if !tools.is_empty() {
+        1024
+    } else if messages.iter().any(|m| m.role == "tool") {
+        512
+    } else {
+        220
+    };
+
     let request = OpenAIChatRequest {
         model: config.llm_model.clone(),
         messages: openai_messages,
         stream: true,
-        max_tokens: 220,
+        max_tokens,
         temperature: 0.7,
         chat_template_kwargs: serde_json::json!({ "enable_thinking": false }),
-        thinking_budget_tokens: 0,
+        thinking_budget_tokens,
         tools: if tools.is_empty() { None } else { Some(tools.to_vec()) },
     };
 
@@ -879,8 +1080,9 @@ pub async fn synthesize(
         return synthesize_windows_sapi(text).await;
     }
 
+    // Chatterbox na GPU pode passar de 20s no primeiro chunk (contenda com LLM / JIT CUDA).
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(120))
         .build()?;
 
     let request = ChatterboxRequest {

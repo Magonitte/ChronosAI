@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 
 interface ProcessingState {
@@ -17,6 +18,8 @@ interface ToolsConfig {
   list_apps: boolean;
   run_command: boolean;
   web_fetch: boolean;
+  launch_desktop_app: boolean;
+  media_controls: boolean;
 }
 
 interface SandboxConfig {
@@ -38,6 +41,8 @@ interface VoiceConfig {
   chatterbox_url: string;
   chatterbox_voice: string;
   system_prompt: string;
+  /** Pastas extra para procurar ficheiros de música (local). */
+  music_library_paths: string;
   tools: ToolsConfig;
   sandbox: SandboxConfig;
 }
@@ -66,11 +71,62 @@ const TOOL_LABEL_MAP: Record<string, string> = {
   list_running_apps: "Listando apps",
   run_command: "Executando comando",
   web_fetch: "Buscando página web",
+  launch_desktop_app: "Abrindo aplicativo",
+  close_desktop_app: "Fechando aplicativo",
+  control_media_playback: "Controlando reprodução",
+  adjust_system_volume: "Ajustando volume",
+  play_music_query: "Abrindo música",
+  play_local_music_playlist: "Montando playlist",
+  play_full_local_music_library: "Exportar M3U (varredura)",
+  native_music_library_shuffle_play: "Biblioteca no reprodutor",
 };
 
 /* ─────────────────────────── Settings: Config Tab ─────────────────────────── */
 
+function mergeUniqueMusicPaths(existing: string, additions: string[]): string {
+  const normKey = (s: string) =>
+    s
+      .trim()
+      .replace(/[/\\]+$/, "")
+      .toLowerCase();
+  const keys = new Set<string>();
+  const ordered: string[] = [];
+  const push = (raw: string) => {
+    const display = raw.trim().replace(/[/\\]+$/, "");
+    if (!display) return;
+    const k = normKey(display);
+    if (keys.has(k)) return;
+    keys.add(k);
+    ordered.push(display);
+  };
+  for (const part of existing.split(/\r?\n|[|;]/)) {
+    push(part);
+  }
+  for (const a of additions) {
+    push(a);
+  }
+  return ordered.join("\n");
+}
+
 function ConfigTab({ config, setConfig }: { config: VoiceConfig; setConfig: (c: VoiceConfig) => void }) {
+  const pickMusicFolders = async () => {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: true,
+        title: "Pastas de música",
+      });
+      if (selected == null) return;
+      const picked = Array.isArray(selected) ? selected : [selected];
+      setConfig({
+        ...config,
+        music_library_paths: mergeUniqueMusicPaths(config.music_library_paths ?? "", picked),
+      });
+    } catch {
+      /* diálogo indisponível fora do Tauri */
+    }
+  };
+
   return (
     <div className="flex flex-col gap-5 p-5 px-6">
       <FieldGroup title="Speech Recognition">
@@ -106,6 +162,37 @@ function ConfigTab({ config, setConfig }: { config: VoiceConfig; setConfig: (c: 
         </Field>
       </FieldGroup>
 
+      <FieldGroup title="Música local">
+        <Field label="Pastas de música">
+          <div className="flex flex-col gap-2">
+            <button
+              type="button"
+              onClick={() => void pickMusicFolders()}
+              className="self-start px-3 py-2 rounded-lg text-[13px] font-medium border border-white/15 bg-white/[0.06] text-white/85 hover:bg-white/[0.1] hover:border-white/25 cursor-pointer transition-all duration-200"
+              title="Escolher uma ou mais pastas no explorador"
+            >
+              Escolher pasta…
+            </button>
+            <textarea
+              id="dexter-music-library-paths"
+              value={config.music_library_paths ?? ""}
+              onChange={(e) => setConfig({ ...config, music_library_paths: e.target.value })}
+              rows={4}
+              spellCheck={false}
+              placeholder={"D:\\Música\nE:\\Media\\MP3"}
+              aria-label="Lista de pastas de música (uma por linha)"
+              className="w-full bg-white/[0.05] border border-white/10 text-white/90 px-3 py-2.5 rounded-lg text-[13px] font-mono outline-none resize-y min-h-[88px] transition-all duration-200 focus:border-blue-500/50 focus:bg-white/[0.07] placeholder:text-white/25"
+            />
+          </div>
+        </Field>
+        <p className="text-[12px] text-white/45 leading-relaxed -mt-2">
+          Basta indicar a <span className="text-white/70">pasta raiz</span> (ex.: Música) — o Dexter procura <span className="text-white/70">em todas as subpastas</span> (artistas, álbuns, etc.); não precisas
+          de adicionar cada pasta de artista. Podes usar <span className="text-white/70">Escolher pasta</span> ou editar a lista à mão (uma por linha, ou <span className="text-white/55">;</span> /{" "}
+          <span className="text-white/55">|</span>). Junta-se à pasta Música do sistema.{" "}
+          <span className="text-white/55 font-mono text-[11px]">DEXTER_MUSIC_PATHS</span> continua válida em paralelo.
+        </p>
+      </FieldGroup>
+
       <FieldGroup title="Personality">
         <Field label="System Prompt">
           <textarea
@@ -131,6 +218,8 @@ const TOOL_DEFINITIONS: { key: keyof ToolsConfig; name: string; desc: string; ic
   { key: "list_apps", name: "Running Apps", desc: "List currently running applications", icon: "🖥" },
   { key: "web_fetch", name: "Web Fetch", desc: "Fetch and read web pages for information", icon: "🕸" },
   { key: "run_command", name: "Shell Command", desc: "Execute terminal commands on your PC", icon: "⚡" },
+  { key: "launch_desktop_app", name: "Launch / Close Apps", desc: "Open or close Cursor, VS Code, Terminal, browsers, Office, etc.", icon: "🚀" },
+  { key: "media_controls", name: "Media & volume", desc: "Play/pause/skip music or video (system session) and master volume", icon: "🎵" },
 ];
 
 function ToolsTab({ config, setConfig }: { config: VoiceConfig; setConfig: (c: VoiceConfig) => void }) {
@@ -433,7 +522,12 @@ function Settings() {
   const [tab, setTab] = useState<SettingsTab>("config");
 
   useEffect(() => {
-    invoke<VoiceConfig>("get_config").then(setConfig);
+    invoke<VoiceConfig>("get_config").then((c) =>
+      setConfig({
+        ...c,
+        music_library_paths: c.music_library_paths ?? "",
+      })
+    );
   }, []);
 
   const save = async () => {

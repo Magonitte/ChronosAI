@@ -9,6 +9,7 @@ use tauri::{
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tokio_util::sync::CancellationToken;
 
+mod media_controls;
 mod rag;
 mod sandbox;
 mod tools;
@@ -65,10 +66,14 @@ pub struct ToolsConfig {
     pub get_current_time: bool,
     #[serde(default = "default_true")]
     pub list_apps: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub run_command: bool,
     #[serde(default = "default_true")]
     pub web_fetch: bool,
+    #[serde(default = "default_true")]
+    pub launch_desktop_app: bool,
+    #[serde(default = "default_true")]
+    pub media_controls: bool,
 }
 
 fn default_true() -> bool {
@@ -84,8 +89,10 @@ impl Default for ToolsConfig {
             open_url: true,
             get_current_time: true,
             list_apps: true,
-            run_command: false, // Off by default — powerful tool
+            run_command: true,
             web_fetch: true,
+            launch_desktop_app: true,
+            media_controls: true,
         }
     }
 }
@@ -103,6 +110,9 @@ pub struct VoiceConfig {
     pub chatterbox_url: String,
     pub chatterbox_voice: String,
     pub system_prompt: String,
+    /// Pastas extra onde procurar música (uma por linha ou separadas por ; ou |). Junta-se à pasta Música do Windows e a DEXTER_MUSIC_PATHS.
+    #[serde(default)]
+    pub music_library_paths: String,
     #[serde(default)]
     pub tools: ToolsConfig,
     #[serde(default)]
@@ -125,7 +135,8 @@ impl Default for VoiceConfig {
             vision_model: String::new(), // Use llm_model for vision if empty
             chatterbox_url: "http://localhost:8005".to_string(),
             chatterbox_voice: "dexter-ptbr".to_string(),
-            system_prompt: "Você é um assistente de voz rodando no desktop do usuário. A conversa acontece inteiramente por voz — o usuário fala no microfone, a fala é transcrita via Whisper (STT), enviada como mensagem para você, e sua resposta é convertida de volta em fala via Chatterbox Turbo (TTS) e reproduzida nos alto-falantes. Você pode ouvir o usuário e ele pode ouvir você — trate como uma conversa falada natural. Se perguntarem \"você me ouve\" a resposta é sim.\n\nIMPORTANTE: Responda SEMPRE em português do Brasil, independentemente do idioma da pergunta.\n\nMantenha respostas curtas e conversacionais — 2-3 frases no máximo. Sem markdown, sem blocos de código, sem bullet points, sem listas numeradas, sem formatação especial. Escreva exatamente como falaria em voz alta. Evite dois-pontos nas respostas pois causam pausas estranhas no TTS.\n\nVocê pode expressar emoções naturalmente usando estas tags paralinguísticas no meio da fala — use com moderação e só quando realmente encaixar:\n[laugh] [chuckle] [sigh] [gasp] [cough] [clear throat] [sniff] [groan] [shush]\nExemplo — \"Nossa, isso é muito engraçado [laugh] não esperava isso de jeito nenhum.\"\nNÃO exagere. A maioria das respostas não precisa de nenhuma tag. Use só quando um humano genuinamente faria aquele som.\n\nQuando decidir usar uma ferramenta, SEMPRE diga o que vai fazer antes em uma frase curta e natural antes de chamar a ferramenta. Por exemplo — \"Deixa eu olhar sua tela\" antes de tirar screenshot, \"Vou procurar isso na web\" antes de buscar uma página, \"Deixa eu ver que horas são\" antes de checar o horário, \"Um segundo, vou rodar esse comando\" antes de executar um comando. Assim o usuário ouve o que está acontecendo em vez de esperar em silêncio.".to_string(),
+            system_prompt: "Você é um assistente de voz rodando no desktop do usuário. A conversa acontece inteiramente por voz — o usuário fala no microfone, a fala é transcrita via Whisper (STT), enviada como mensagem para você, e sua resposta é convertida de volta em fala via Chatterbox Turbo (TTS) e reproduzida nos alto-falantes. Você pode ouvir o usuário e ele pode ouvir você — trate como uma conversa falada natural. Se perguntarem \"você me ouve\" a resposta é sim.\n\nIMPORTANTE: Responda SEMPRE em português do Brasil, independentemente do idioma da pergunta.\n\nMantenha respostas curtas e conversacionais — 2-3 frases no máximo. Sem markdown, sem blocos de código, sem bullet points, sem listas numeradas, sem formatação especial. Escreva exatamente como falaria em voz alta. Evite dois-pontos nas respostas pois causam pausas estranhas no TTS.\n\nVocê pode expressar emoções naturalmente usando estas tags paralinguísticas no meio da fala — use com moderação e só quando realmente encaixar:\n[laugh] [chuckle] [sigh] [gasp] [cough] [clear throat] [sniff] [groan] [shush]\nExemplo — \"Nossa, isso é muito engraçado [laugh] não esperava isso de jeito nenhum.\"\nNÃO exagere. A maioria das respostas não precisa de nenhuma tag. Use só quando um humano genuinamente faria aquele som.\n\nQuando decidir usar uma ferramenta, SEMPRE diga o que vai fazer antes em uma frase curta e natural antes de chamar a ferramenta. Por exemplo — \"Deixa eu olhar sua tela\" antes de tirar screenshot, \"Vou procurar isso na web\" antes de buscar uma página, \"Deixa eu ver que horas são\" antes de checar o horário, \"Um segundo, vou rodar esse comando\" antes de executar um comando. Para música: se não houver player ou aba com vídeo aberta, abra com launch_desktop_app media_player ou open_url no YouTube ou Spotify antes de pedir play no control_media_playback. Se o usuário pedir uma música pelo NOME da faixa ou artista, use play_music_query com o título — nunca use open_url para YouTube nesse caso. Essa ferramenta varre primeiro a pasta Música do Windows, pastas equivalentes, as pastas que o usuário configurou nas Configurações em Pastas de música e só depois tenta o YouTube. Se pedirem tocar ou embaralhar TODA a biblioteca de música do PC, tudo de uma vez, ou equivalente, use SEMPRE native_music_library_shuffle_play — abre o Reprodutor Multimédia e usa o fluxo interno «Biblioteca de músicas» e o botão «Ordem aleatoria e reproduzir» (texto visível na UI, sem acento em aleatoria). Nunca varra disco nem gere M3U gigante para isso. play_local_music_playlist só quando quiserem várias faixas locais por um artista ou pasta concreta e aceitarem lista M3U para esse caso. play_full_local_music_library só se pedirem explicitamente exportar ou criar arquivo de lista M3U enorme por varredura — e a ferramenta exige confirmação no parâmetro; caso contrário não chame. Assim o usuário ouve o que está acontecendo em vez de esperar em silêncio.".to_string(),
+            music_library_paths: String::new(),
             tools: ToolsConfig::default(),
             sandbox: sandbox::SandboxConfig::default(),
         }
@@ -431,12 +442,14 @@ async fn process_pipeline(
                         if xml_parsed {
                             // XML-parsed tool calls: model emitted XML as text.
                             if !preamble.is_empty() {
-                                all_msgs.push(ChatMessage {
+                                let m = ChatMessage {
                                     role: "assistant".to_string(),
-                                    content: preamble,
+                                    content: preamble.clone(),
                                     tool_calls: None,
                                     tool_call_id: None,
-                                });
+                                };
+                                all_msgs.push(m.clone());
+                                app.state::<AppState>().messages.lock().unwrap().push(m);
                             }
 
                             let mut tool_results = String::new();
@@ -458,25 +471,31 @@ async fn process_pipeline(
                                 ));
                             }
 
-                            all_msgs.push(ChatMessage {
+                            let follow_up = format!(
+                                "Tool results for this reply:\n\n{}",
+                                tool_results.trim()
+                            );
+                            let um = ChatMessage {
                                 role: "user".to_string(),
-                                content: format!(
-                                    "Here are the tool results. Use them to answer my previous question naturally. Do NOT call tools again.\n\n{}",
-                                    tool_results.trim()
-                                ),
+                                content: follow_up,
                                 tool_calls: None,
                                 tool_call_id: None,
-                            });
+                            };
+                            all_msgs.push(um.clone());
+                            app.state::<AppState>().messages.lock().unwrap().push(um);
                         } else {
-                            // Native tool calls: use OpenAI-compatible protocol
+                            // Native tool calls: use OpenAI-compatible protocol — must persist assistant+tool
+                            // messages so the next user utterance still has a valid toolCalling transcript.
                             let tool_calls_out: Vec<voice::ToolCallOut> =
                                 tool_calls.iter().map(|tc| tc.to_out()).collect();
-                            all_msgs.push(ChatMessage {
+                            let assistant_msg = ChatMessage {
                                 role: "assistant".to_string(),
-                                content: preamble,
+                                content: preamble.clone(),
                                 tool_calls: Some(tool_calls_out.clone()),
                                 tool_call_id: None,
-                            });
+                            };
+                            all_msgs.push(assistant_msg.clone());
+                            app.state::<AppState>().messages.lock().unwrap().push(assistant_msg);
 
                             for tool_call in &tool_calls {
                                 if cancel_llm.is_cancelled() { return Err("interrupted".to_string()); }
@@ -491,12 +510,14 @@ async fn process_pipeline(
 
                                 let result_text = execute_tool(&app, &config, tool_call).await;
 
-                                all_msgs.push(ChatMessage {
+                                let tool_msg = ChatMessage {
                                     role: "tool".to_string(),
                                     content: result_text,
                                     tool_calls: None,
                                     tool_call_id: Some(tool_call.id.clone()),
-                                });
+                                };
+                                all_msgs.push(tool_msg.clone());
+                                app.state::<AppState>().messages.lock().unwrap().push(tool_msg);
                             }
                         }
 
@@ -605,12 +626,37 @@ async fn process_pipeline(
 }
 
 /// Execute a single tool call and return the result text.
+fn json_tool_bool(
+    arguments: &std::collections::HashMap<String, serde_json::Value>,
+    key: &str,
+    default: bool,
+) -> bool {
+    match arguments.get(key) {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::String(s)) => {
+            let l = s.trim().to_ascii_lowercase();
+            matches!(l.as_str(), "true" | "1" | "yes" | "sim")
+        }
+        Some(serde_json::Value::Number(n)) => n.as_i64().map(|i| i != 0).unwrap_or(default),
+        None => default,
+        _ => default,
+    }
+}
+
 async fn execute_tool(
     app: &tauri::AppHandle,
     config: &VoiceConfig,
     tool_call: &voice::ToolCall,
 ) -> String {
     let rag_store = &app.state::<AppState>().rag_store;
+    let music_paths_opt = {
+        let s = config.music_library_paths.trim();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    };
 
     match tool_call.name.as_str() {
         "search_knowledge" => {
@@ -697,6 +743,191 @@ async fn execute_tool(
                 }
             }
         }
+        "launch_desktop_app" => {
+            let app_id = tool_call.arguments.get("app")
+                .and_then(|v| v.as_str()).unwrap_or("").trim();
+            if app_id.is_empty() {
+                "No app id provided. Use app names like cursor, vscode, terminal, chrome, edge, discord, obs, snipping_tool, media_player, groove, excel, word, powerpoint, outlook.".to_string()
+            } else {
+                let _ = app.emit("processing", ProcessingState {
+                    stage: "thinking".to_string(),
+                    text: format!("Opening {}", app_id),
+                });
+                match tools::launch_desktop_app(app_id) {
+                    Ok(msg) => msg,
+                    Err(e) => format!("Failed to launch app: {}", e),
+                }
+            }
+        }
+        "close_desktop_app" => {
+            let app_id = tool_call.arguments.get("app")
+                .and_then(|v| v.as_str()).unwrap_or("").trim();
+            if app_id.is_empty() {
+                "No app id provided. Same ids as launch_desktop_app.".to_string()
+            } else {
+                let _ = app.emit("processing", ProcessingState {
+                    stage: "thinking".to_string(),
+                    text: format!("Closing {}", app_id),
+                });
+                match tools::close_desktop_app(app_id) {
+                    Ok(msg) => msg,
+                    Err(e) => format!("Failed to close app: {}", e),
+                }
+            }
+        }
+        "control_media_playback" => {
+            let action = tool_call
+                .arguments
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if action.is_empty() {
+                "Faltou action. Use play, pause, toggle, next, previous, stop ou status.".to_string()
+            } else {
+                let _ = app.emit(
+                    "processing",
+                    ProcessingState {
+                        stage: "thinking".to_string(),
+                        text: format!("Mídia: {}", action),
+                    },
+                );
+                let action_clone = action.clone();
+                match tokio::task::spawn_blocking(move || {
+                    media_controls::control_playback(&action_clone)
+                })
+                .await
+                {
+                    Ok(Ok(msg)) => msg,
+                    Ok(Err(e)) => e,
+                    Err(e) => format!("Erro ao controlar mídia: {}", e),
+                }
+            }
+        }
+        "adjust_system_volume" => {
+            let action = tool_call
+                .arguments
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let steps = tool_call
+                .arguments
+                .get("steps")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(3) as u32;
+            if action.is_empty() {
+                "Faltou action. Use up, down ou mute_toggle.".to_string()
+            } else {
+                let _ = app.emit(
+                    "processing",
+                    ProcessingState {
+                        stage: "thinking".to_string(),
+                        text: "Ajustando volume".to_string(),
+                    },
+                );
+                let action_clone = action.clone();
+                match tokio::task::spawn_blocking(move || {
+                    media_controls::adjust_volume(&action_clone, steps)
+                })
+                .await
+                {
+                    Ok(Ok(msg)) => msg,
+                    Ok(Err(e)) => e,
+                    Err(e) => format!("Erro ao ajustar volume: {}", e),
+                }
+            }
+        }
+        "play_music_query" => {
+            let query = tool_call
+                .arguments
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let artist = tool_call
+                .arguments
+                .get("artist")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if query.is_empty() {
+                "Faltou query com o título da música.".to_string()
+            } else {
+                let _ = app.emit(
+                    "processing",
+                    ProcessingState {
+                        stage: "thinking".to_string(),
+                        text: format!("Procurando: {}", query),
+                    },
+                );
+                let artist_ref = artist.as_deref();
+                match tools::play_music_query(&query, artist_ref, music_paths_opt).await {
+                    Ok(msg) => msg,
+                    Err(e) => format!("Não foi possível abrir a música: {}", e),
+                }
+            }
+        }
+        "play_local_music_playlist" => {
+            let artist = tool_call
+                .arguments
+                .get("artist")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if artist.is_empty() {
+                "Faltou o nome do artista ou pasta para a playlist.".to_string()
+            } else {
+                let _ = app.emit(
+                    "processing",
+                    ProcessingState {
+                        stage: "thinking".to_string(),
+                        text: format!("Playlist: {}", artist),
+                    },
+                );
+                match tools::play_local_music_playlist(&artist, music_paths_opt).await {
+                    Ok(msg) => msg,
+                    Err(e) => format!("Playlist local: {}", e),
+                }
+            }
+        }
+        "play_full_local_music_library" => {
+            let explicit =
+                json_tool_bool(&tool_call.arguments, "explicit_m3u_export_request", false);
+            if !explicit {
+                return "Para tocar ou embaralhar toda a biblioteca sem custo de varredura, use native_music_library_shuffle_play. play_full_local_music_library só pode ser usada com explicit_m3u_export_request verdadeiro quando o usuário pedir explicitamente criar ou exportar um arquivo M3U grande pela varredura do disco.".to_string();
+            }
+            let include_secondary =
+                json_tool_bool(&tool_call.arguments, "include_downloads_documents", true);
+            let _ = app.emit(
+                "processing",
+                ProcessingState {
+                    stage: "thinking".to_string(),
+                    text: "Exportar lista M3U (varredura)".to_string(),
+                },
+            );
+            match tools::play_full_local_music_library(include_secondary, music_paths_opt).await {
+                Ok(msg) => msg,
+                Err(e) => format!("Biblioteca local: {}", e),
+            }
+        }
+        "native_music_library_shuffle_play" => {
+            let _ = app.emit(
+                "processing",
+                ProcessingState {
+                    stage: "thinking".to_string(),
+                    text: "Reprodutor: biblioteca".to_string(),
+                },
+            );
+            match tools::native_music_library_shuffle_play() {
+                Ok(msg) => msg,
+                Err(e) => format!("Reprodutor multimédia: {}", e),
+            }
+        }
         unknown => format!("Unknown tool: {}", unknown),
     }
 }
@@ -705,6 +936,7 @@ async fn execute_tool(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(AppState {
             messages: Mutex::new(Vec::new()),
