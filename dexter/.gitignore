@@ -31,3 +31,9 @@ src-tauri/gen/schemas/
 
 # Notas internas da equipa (planos, migração, sessões — não versionadas)
 Documentação/
+
+# Raiz do projeto Dexter: planos de implementação, resumos de lote/sessão
+# (prefixo / = só nesta pasta, não em chatterbox-tts-api nem outros submódulos)
+/IMPLEMENTATION_PLAN.md
+/FIX_AND_EMBED_PLAN.md
+/LOTE*_SUMMARY.md
