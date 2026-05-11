@@ -58,7 +58,7 @@ impl RagStore {
         &self,
         source: &str,
         text: &str,
-        llm_url: &str,
+        embed_url: &str,
         embed_model: &str,
     ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
         let chunks = chunk_text(text, CHUNK_SIZE, CHUNK_OVERLAP);
@@ -67,7 +67,7 @@ impl RagStore {
         }
 
         // Embed all chunks in parallel
-        let embeddings = embed_texts(llm_url, embed_model, &chunks).await?;
+        let embeddings = embed_texts(embed_url, embed_model, &chunks).await?;
 
         let db = self.db.lock().unwrap();
         // Remove old chunks from this source
@@ -89,11 +89,11 @@ impl RagStore {
     pub async fn search(
         &self,
         query: &str,
-        llm_url: &str,
+        embed_url: &str,
         embed_model: &str,
         top_k: usize,
     ) -> Result<Vec<SearchResult>, Box<dyn std::error::Error + Send + Sync>> {
-        let query_embeddings = embed_texts(llm_url, embed_model, &[query.to_string()]).await?;
+        let query_embeddings = embed_texts(embed_url, embed_model, &[query.to_string()]).await?;
         let query_emb = &query_embeddings[0];
 
         let db = self.db.lock().unwrap();
@@ -199,7 +199,7 @@ fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
 /// Embed texts using llama.cpp's /embedding endpoint.
 /// Makes concurrent requests for batch embedding.
 async fn embed_texts(
-    llm_url: &str,
+    embed_url: &str,
     _model: &str,
     texts: &[String],
 ) -> Result<Vec<Vec<f64>>, Box<dyn std::error::Error + Send + Sync>> {
@@ -210,7 +210,7 @@ async fn embed_texts(
     // Make concurrent requests for each text
     let futures: Vec<_> = texts.iter().map(|text| {
         let client = client.clone();
-        let url = format!("{}/embedding", llm_url);
+        let url = format!("{}/embedding", embed_url);
         let body = serde_json::json!({
             "content": text,
         });

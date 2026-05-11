@@ -1,11 +1,55 @@
 use crate::{AppState, ChatMessage, VoiceConfig};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::Write;
+use std::sync::OnceLock;
 use tauri::Manager;
 use tokio::sync::mpsc;
-use std::collections::HashMap;
+
+/// Removes Chatterbox-Turbo-style paralinguistic markers from text.
+/// The bundled TTS stack (multilingual / Windows SAPI) does not interpret these;
+/// they would be spoken as literal words or garbled audio.
+fn paralinguistic_bracket_pattern() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)\[\s*(?:laugh|chuckle|sigh|gasp|cough|clear\s+throat|sniff|groan|shush)\s*\]",
+        )
+        .expect("static regex")
+    })
+}
+
+fn squeeze_spaces(s: &str) -> String {
+    let s = paralinguistic_bracket_pattern().replace_all(s, "");
+    let s = Regex::new(r" {2,}").expect("static regex").replace_all(&s, " ");
+    s.trim().to_string()
+}
+
+pub fn strip_paralinguistic_brackets(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    squeeze_spaces(text)
+}
+
+/// Play a short feedback beep via Windows system speaker.
+/// Only plays when `audio_feedback` is enabled in config.
+pub fn play_mic_beep(config: &VoiceConfig) {
+    if !config.audio_feedback {
+        return;
+    }
+
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-Command", "[Console]::Beep(800, 80)"])
+            .spawn();
+    }
+}
 
 // ── Audio Recording (cpal) ──
 
@@ -60,6 +104,13 @@ pub fn record_audio(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Er
     };
 
     stream.play()?;
+
+    // Play mic-open feedback beep if enabled.
+    {
+        let state = app_clone.state::<AppState>();
+        let cfg = state.config.lock().unwrap().clone();
+        play_mic_beep(&cfg);
+    }
 
     // Spin until recording is stopped
     loop {
@@ -687,6 +738,93 @@ pub enum StreamResult {
     ToolCalls(Vec<ToolCall>, String, bool),
 }
 
+/// Token chunk emitted during text-chat streaming.
+#[derive(Clone, Serialize)]
+pub struct ChatTokenChunk {
+    pub token: String,
+}
+
+/// Result of a streaming text-chat round.
+pub enum ChatStreamResult {
+    Content(String),
+    ToolCalls(Vec<ToolCall>, String, bool),
+}
+
+fn should_use_text_chat_thinking(
+    config: &VoiceConfig,
+    messages: &[ChatMessage],
+    tools: &[serde_json::Value],
+) -> bool {
+    if config.enable_thinking {
+        return true;
+    }
+
+    let Some(last_user) = messages.iter().rev().find(|msg| msg.role == "user") else {
+        return false;
+    };
+
+    let text = last_user.content.to_lowercase();
+    let word_count = text.split_whitespace().count();
+    let simple_greeting = word_count <= 10
+        && [
+            "oi",
+            "ola",
+            "olá",
+            "bom dia",
+            "boa tarde",
+            "boa noite",
+            "como vai",
+            "tudo bem",
+        ]
+        .iter()
+        .any(|term| text.contains(term));
+
+    if simple_greeting {
+        return false;
+    }
+
+    let complexity_markers = [
+        "analise",
+        "analisa",
+        "avaliar",
+        "compare",
+        "planeje",
+        "estrategia",
+        "arquitetura",
+        "debug",
+        "erro",
+        "bug",
+        "corrigir",
+        "refator",
+        "implemente",
+        "codigo",
+        "código",
+        "script",
+        "sql",
+        "regex",
+        "explique",
+        "por que",
+        "passo a passo",
+        "melhorar",
+        "otimizar",
+        "performance",
+        "seguranca",
+        "segurança",
+        "trade-off",
+        "decisao",
+        "decisão",
+        "investigue",
+        "olha essa tela",
+        "olhada nessa tela",
+        "design",
+    ];
+
+    word_count > 35
+        || !tools.is_empty()
+            && complexity_markers.iter().any(|term| text.contains(term))
+        || complexity_markers.iter().filter(|term| text.contains(**term)).count() >= 2
+}
+
 /// Unified streaming chat using OpenAI-compatible API (llama.cpp).
 pub async fn chat_streaming(
     config: &VoiceConfig,
@@ -699,9 +837,25 @@ pub async fn chat_streaming(
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
 
+    let voice_system_prompt = if !config.system_prompt.trim().is_empty() {
+        config.system_prompt.clone()
+    } else if config.personality == "coder" {
+        "Voce e um assistente de programacao. Responda em portugues do Brasil. \
+         Mantenha respostas curtas e conversacionais — 2-3 frases no maximo. \
+         Sem markdown, sem blocos de codigo. Escreva exatamente como falaria em voz alta. \
+         Voce tem acesso a ferramentas para interagir com o sistema do usuario.".to_string()
+    } else if config.personality == "creative" {
+        "Voce e um assistente criativo. Responda em portugues do Brasil. \
+         Mantenha respostas curtas e conversacionais — 2-3 frases no maximo. \
+         Sem markdown, sem blocos de codigo. Escreva exatamente como falaria em voz alta. \
+         Ofereca perspectivas variadas quando relevante.".to_string()
+    } else {
+        config.system_prompt.clone()
+    };
+
     let mut openai_messages: Vec<OpenAIMessage> = vec![OpenAIMessage {
         role: "system".to_string(),
-        content: serde_json::Value::String(config.system_prompt.clone()),
+        content: serde_json::Value::String(voice_system_prompt),
         tool_calls: None,
         tool_call_id: None,
     }];
@@ -729,21 +883,20 @@ pub async fn chat_streaming(
     // Fix: Gemma 4-style models spend 200-400 tokens in reasoning_content before producing
     // visible text. A thinking_budget of 0 (unlimited) can consume all tokens. Use 256 to
     // reserve space for a visible response (~0.5s at 21 tok/s).
-    let thinking_budget_tokens = if tools.is_empty() {
-        256
+    let thinking_budget_tokens = if config.enable_thinking {
+        if tools.is_empty() { 512 } else { 1024 }
     } else {
-        256
+        0
     };
 
     // Short replies for voice when no tools; larger budget when tools are enabled so tool_calls JSON
     // is not truncated. After a tool transcript exists in history, allow a bit more tokens for the final answer.
     // Bumped to 600 (was 220) to accommodate 200-400 tokens of reasoning + visible response.
-    let max_tokens = if !tools.is_empty() {
-        1024
-    } else if messages.iter().any(|m| m.role == "tool") {
-        512
-    } else {
-        600
+    let has_tool_history = messages.iter().any(|m| m.role == "tool");
+    let max_tokens = match config.response_style.as_str() {
+        "concise" => if !tools.is_empty() { 512 } else if has_tool_history { 256 } else { 200 },
+        "detailed" => if !tools.is_empty() { 2048 } else if has_tool_history { 1024 } else { 1024 },
+        _ => if !tools.is_empty() { 1024 } else if has_tool_history { 512 } else { 600 },
     };
 
     let request = OpenAIChatRequest {
@@ -751,8 +904,10 @@ pub async fn chat_streaming(
         messages: openai_messages,
         stream: true,
         max_tokens,
-        temperature: 0.7,
-        chat_template_kwargs: serde_json::json!({ "enable_thinking": false }),
+        temperature: config.temperature,
+        chat_template_kwargs: serde_json::json!({
+            "enable_thinking": config.enable_thinking
+        }),
         thinking_budget_tokens,
         tools: if tools.is_empty() { None } else { Some(tools.to_vec()) },
     };
@@ -897,7 +1052,8 @@ pub async fn chat_streaming(
 
                                         if has_tools && xml_open_re.find(&sentence_buffer).is_some() {
                                             let m = xml_open_re.find(&sentence_buffer).unwrap();
-                                            let before = sentence_buffer[..m.start()].trim().to_string();
+                                            let before =
+                                                strip_paralinguistic_brackets(&sentence_buffer[..m.start()]);
                                             if !before.is_empty() {
                                                 let preview: String = before.chars().take(40).collect();
                                                 eprintln!(
@@ -928,7 +1084,8 @@ pub async fn chat_streaming(
                                         } else {
                                             while let Some(split_pos) = find_tts_chunk_end(&sentence_buffer) {
                                                 let sentence: String = sentence_buffer.drain(..=split_pos).collect();
-                                                let sentence = sentence.trim().to_string();
+                                                let sentence =
+                                                    strip_paralinguistic_brackets(sentence.trim());
                                                 if !sentence.is_empty() {
                                                     let preview: String = sentence.chars().take(40).collect();
                                                     eprintln!(
@@ -957,7 +1114,7 @@ pub async fn chat_streaming(
 
     // Flush remaining sentence buffer
     if !xml_collecting {
-        let remaining = sentence_buffer.trim().to_string();
+        let remaining = strip_paralinguistic_brackets(sentence_buffer.trim());
         if !remaining.is_empty() {
             let preview: String = remaining.chars().take(40).collect();
             eprintln!(
@@ -1009,7 +1166,327 @@ pub async fn chat_streaming(
     }
 
     let _ = sentence_seq;
-    Ok(StreamResult::Content(full_response.trim().to_string()))
+    Ok(StreamResult::Content(strip_paralinguistic_brackets(
+        full_response.trim(),
+    )))
+}
+
+/// Streaming chat for text mode: full responses, markdown-friendly output, no TTS splitting.
+pub async fn chat_streaming_text(
+    config: &VoiceConfig,
+    messages: &[ChatMessage],
+    tools: &[serde_json::Value],
+    token_tx: &mpsc::Sender<ChatTokenChunk>,
+) -> Result<ChatStreamResult, Box<dyn std::error::Error + Send + Sync>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()?;
+
+    let text_system_prompt = if !config.system_prompt_text.trim().is_empty() {
+        config.system_prompt_text.clone()
+    } else if config.personality == "coder" {
+        "Voce e um assistente de programacao. Responda em portugues do Brasil. \
+         Use blocos de codigo com syntax highlighting quando relevante. \
+         Seja detalhado e tecnico. Explique o raciocinio por tras das solucoes. \
+         Use markdown para estruturar a resposta."
+            .to_string()
+    } else if config.personality == "creative" {
+        "Voce e um assistente criativo. Responda em portugues do Brasil. \
+         Pense fora da caixa, ofereca multiplas perspectivas. \
+         Respostas podem ser mais longas e elaboradas. \
+         Use markdown para estruturar a resposta."
+            .to_string()
+    } else {
+        "Voce e um assistente de IA rodando no desktop do usuario. \
+         Responda em portugues do Brasil. \
+         Seja detalhado, use markdown para estruturar a resposta. \
+         Use blocos de codigo com syntax highlighting quando relevante. \
+         O historico completo da conversa vem nas mensagens anteriores; use-o para entender \
+         referencias como \"isso\", \"isso ai\", \"o que voce disse\", etc., sem dizer que a conversa comecou agora. \
+         Voce tem acesso a ferramentas para interagir com o sistema do usuario \
+         (captura de tela, comandos, busca na web, etc.)."
+            .to_string()
+    };
+
+    let mut openai_messages: Vec<OpenAIMessage> = vec![OpenAIMessage {
+        role: "system".to_string(),
+        content: serde_json::Value::String(text_system_prompt),
+        tool_calls: None,
+        tool_call_id: None,
+    }];
+
+    for msg in messages {
+        let tool_calls: Option<Vec<OpenAIToolCall>> = msg.tool_calls.as_ref().map(|tcs| {
+            tcs.iter()
+                .map(|tc| OpenAIToolCall {
+                    id: tc.id.clone(),
+                    call_type: tc.call_type.clone(),
+                    function: OpenAIToolFunction {
+                        name: tc.function.name.clone(),
+                        arguments: tc.function.arguments.clone(),
+                    },
+                })
+                .collect()
+        });
+
+        openai_messages.push(OpenAIMessage {
+            role: msg.role.clone(),
+            content: serde_json::Value::String(msg.content.clone()),
+            tool_calls,
+            tool_call_id: msg.tool_call_id.clone(),
+        });
+    }
+
+    let has_tool_history = messages.iter().any(|m| m.role == "tool");
+    let max_tokens = match config.response_style.as_str() {
+        "concise" => 1024,
+        "detailed" => 4096,
+        _ => {
+            if has_tool_history {
+                3072
+            } else {
+                2048
+            }
+        }
+    };
+    let use_thinking = should_use_text_chat_thinking(config, messages, tools);
+
+    let request = OpenAIChatRequest {
+        model: config.llm_model.clone(),
+        messages: openai_messages,
+        stream: true,
+        max_tokens,
+        temperature: config.temperature,
+        chat_template_kwargs: serde_json::json!({
+            "enable_thinking": use_thinking
+        }),
+        thinking_budget_tokens: if use_thinking { 2048 } else { 0 },
+        tools: if tools.is_empty() { None } else { Some(tools.to_vec()) },
+    };
+
+    let llm_start = std::time::Instant::now();
+    let resp = client
+        .post(format!("{}/v1/chat/completions", config.llm_url))
+        .json(&request)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Erro na API do LLM {}: {}", status, body).into());
+    }
+
+    let mut byte_stream = resp.bytes_stream();
+    use tokio_stream::StreamExt;
+
+    let mut full_response = String::new();
+    let mut pending_tool_calls: Vec<ToolCallAccumulator> = Vec::new();
+    let mut collected_tool_calls: Vec<ToolCall> = Vec::new();
+    let has_tools = !tools.is_empty();
+
+    let xml_open_re = regex::Regex::new(r"<(?:\w+:)?tool_call>").unwrap();
+    let xml_close_re = regex::Regex::new(r"</(?:\w+:)?tool_call>").unwrap();
+    let mut xml_collecting = false;
+    let mut xml_buffer = String::new();
+    let mut xml_check_buffer = String::new();
+    let acc_chars_for_xml: usize = 200;
+
+    let mut first_content_token = false;
+    let mut line_buffer = Vec::new();
+    let mut stream_done = false;
+
+    while let Some(chunk) = byte_stream.next().await {
+        let chunk = chunk?;
+        line_buffer.extend_from_slice(&chunk);
+
+        while let Some(newline_pos) = line_buffer.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = line_buffer.drain(..=newline_pos).collect();
+            let line_str = String::from_utf8_lossy(&line);
+            let line_str = line_str.trim();
+
+            if line_str.is_empty() {
+                continue;
+            }
+
+            if let Some(data) = line_str.strip_prefix("data: ") {
+                if data == "[DONE]" {
+                    stream_done = true;
+                    break;
+                }
+
+                if let Ok(chunk) = serde_json::from_str::<OpenAIStreamChunk>(data) {
+                    for choice in &chunk.choices {
+                        if let Some(reason) = &choice.finish_reason {
+                            if reason == "tool_calls" || reason == "stop" {
+                                for acc in &pending_tool_calls {
+                                    if let Ok(args) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&acc.arguments) {
+                                        collected_tool_calls.push(ToolCall {
+                                            id: acc.id.clone(),
+                                            name: acc.name.clone(),
+                                            arguments: args,
+                                        });
+                                    }
+                                }
+                                pending_tool_calls.clear();
+                                continue;
+                            }
+                        }
+
+                        if let Some(delta) = &choice.delta {
+                            if let Some(tool_call_deltas) = &delta.tool_calls {
+                                for tc_delta in tool_call_deltas {
+                                    while pending_tool_calls.len() <= tc_delta.index {
+                                        pending_tool_calls.push(ToolCallAccumulator {
+                                            id: String::new(),
+                                            name: String::new(),
+                                            arguments: String::new(),
+                                        });
+                                    }
+
+                                    let acc = &mut pending_tool_calls[tc_delta.index];
+                                    if let Some(ref id) = tc_delta.id {
+                                        acc.id = id.clone();
+                                    }
+                                    if let Some(ref func) = tc_delta.function {
+                                        if let Some(ref name) = func.name {
+                                            acc.name = name.clone();
+                                        }
+                                        if let Some(ref args) = func.arguments {
+                                            acc.arguments.push_str(args);
+                                        }
+                                    }
+                                }
+                            }
+
+                            if let Some(content) = &delta.content {
+                                if content.is_empty() {
+                                    continue;
+                                }
+
+                                if !first_content_token {
+                                    first_content_token = true;
+                                    eprintln!(
+                                        "[chat-text] ttft_ms={}",
+                                        llm_start.elapsed().as_millis()
+                                    );
+                                }
+
+                                full_response.push_str(content);
+
+                                if !has_tools {
+                                    let _ = token_tx
+                                        .send(ChatTokenChunk {
+                                            token: content.clone(),
+                                        })
+                                        .await;
+                                    continue;
+                                }
+
+                                if xml_collecting {
+                                    xml_buffer.push_str(content);
+                                    if xml_close_re.is_match(&xml_buffer) {
+                                        let full_xml = format!("<tool_call>{}</tool_call>", xml_buffer);
+                                        if let Some(parsed) = parse_xml_tool_calls(&full_xml) {
+                                            collected_tool_calls.extend(parsed);
+                                        }
+                                        xml_buffer.clear();
+                                        xml_collecting = false;
+                                    }
+                                } else {
+                                    xml_check_buffer.push_str(content);
+                                    let should_check = xml_check_buffer.len() >= acc_chars_for_xml
+                                        || !content.contains(|c: char| c.is_alphanumeric());
+
+                                    if xml_open_re.find(&xml_check_buffer).is_some() && should_check {
+                                        let m = xml_open_re.find(&xml_check_buffer).unwrap();
+                                        let before = xml_check_buffer[..m.start()].to_string();
+                                        let after_tag = xml_check_buffer[m.end()..].to_string();
+                                        xml_check_buffer.clear();
+
+                                        if !before.is_empty() {
+                                            let _ = token_tx
+                                                .send(ChatTokenChunk { token: before })
+                                                .await;
+                                        }
+
+                                        xml_buffer = after_tag;
+                                        xml_collecting = true;
+
+                                        if xml_close_re.is_match(&xml_buffer) {
+                                            let full_xml = format!("<tool_call>{}</tool_call>", xml_buffer);
+                                            if let Some(parsed) = parse_xml_tool_calls(&full_xml) {
+                                                collected_tool_calls.extend(parsed);
+                                            }
+                                            xml_buffer.clear();
+                                            xml_collecting = false;
+                                        }
+                                    } else if !xml_check_buffer.is_empty() {
+                                        let _ = token_tx
+                                            .send(ChatTokenChunk {
+                                                token: xml_check_buffer.clone(),
+                                            })
+                                            .await;
+                                        xml_check_buffer.clear();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if stream_done {
+                break;
+            }
+        }
+
+        if stream_done {
+            break;
+        }
+    }
+
+    if !xml_check_buffer.is_empty() && !xml_collecting {
+        let _ = token_tx
+            .send(ChatTokenChunk {
+                token: xml_check_buffer,
+            })
+            .await;
+    }
+
+    for acc in &pending_tool_calls {
+        if !acc.name.is_empty() {
+            if let Ok(args) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&acc.arguments) {
+                collected_tool_calls.push(ToolCall {
+                    id: acc.id.clone(),
+                    name: acc.name.clone(),
+                    arguments: args,
+                });
+            }
+        }
+    }
+
+    if !collected_tool_calls.is_empty() {
+        return Ok(ChatStreamResult::ToolCalls(
+            collected_tool_calls,
+            String::new(),
+            false,
+        ));
+    }
+
+    if has_tools && !full_response.is_empty() {
+        if let Some(parsed) = parse_xml_tool_calls(&full_response) {
+            if !parsed.is_empty() {
+                return Ok(ChatStreamResult::ToolCalls(
+                    parsed,
+                    String::new(),
+                    true,
+                ));
+            }
+        }
+    }
+
+    Ok(ChatStreamResult::Content(full_response.trim().to_string()))
 }
 
 struct ToolCallAccumulator {
@@ -1121,6 +1598,12 @@ pub async fn synthesize(
     text: &str,
     seq: u32,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let text = strip_paralinguistic_brackets(text);
+    if text.is_empty() {
+        return Err("texto vazio apos remover marcadores de fala".into());
+    }
+    let text = text.as_str();
+
     let tts_mode = std::env::var("DEXTER_TTS_MODE").unwrap_or_default();
     if tts_mode.eq_ignore_ascii_case("windows") {
         eprintln!(
@@ -1129,7 +1612,7 @@ pub async fn synthesize(
             text.chars().count(),
             text.chars().take(40).collect::<String>()
         );
-        return synthesize_windows_sapi(text).await;
+        return synthesize_windows_sapi(text, config.tts_volume).await;
     }
 
     let preview: String = text.chars().take(40).collect();
@@ -1170,7 +1653,7 @@ pub async fn synthesize(
         }
         Err(err) => {
             eprintln!("[TTS] Chatterbox indisponivel, usando Windows TTS: {}", err);
-            return synthesize_windows_sapi(text).await;
+            return synthesize_windows_sapi(text, config.tts_volume).await;
         }
     };
 
@@ -1178,7 +1661,7 @@ pub async fn synthesize(
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         eprintln!("[TTS] Chatterbox API error {}: {}. Usando Windows TTS.", status, body);
-        return synthesize_windows_sapi(text).await;
+        return synthesize_windows_sapi(text, config.tts_volume).await;
     }
 
     let body_start = std::time::Instant::now();
@@ -1202,6 +1685,7 @@ pub async fn synthesize(
 
 async fn synthesize_windows_sapi(
     text: &str,
+    volume: u8,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let text = text.to_string();
 
@@ -1228,7 +1712,7 @@ try {{
     }}
 }} catch {{}}
 $synth.Rate = 1
-$synth.Volume = 100
+$synth.Volume = {volume}
 $synth.SetOutputToWaveFile('{output_path_str}')
 $synth.Speak($text)
 $synth.Dispose()

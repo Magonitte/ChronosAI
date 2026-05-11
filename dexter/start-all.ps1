@@ -1,7 +1,7 @@
 ﻿# Voice Assistant - Launcher (Windows)
 # Inicia todos os servidores + o assistente com um unico comando.
 #
-# Uso: .\start-all.ps1 [-Profile voice-fast|balanced|quality|voice-chatterbox|voice-chatterbox-cpu] [-ForceRestartServices]
+# Uso: .\start-all.ps1 [-Profile voice-fast|balanced|quality|voice-chatterbox|voice-chatterbox-cpu] [-ForceRestartServices] [-NoWhisper] [-WhisperTiny] [-NoTts] [-NoEmbedding]
 #  Padrao: voice-chatterbox (menos camadas GPU no LLM -ngl 28 + Chatterbox TTS em CUDA / clone de voz)
 #  voice-chatterbox-cpu: Chatterbox em CPU (sem contencao VRAM), LLM com -ngl 99 e contexto 8192
 # Para encerrar: Ctrl+C (mata todos os processos automaticamente)
@@ -13,7 +13,8 @@ param(
     [switch]$KeepStaleFrontend,
     [switch]$NoWhisper,
     [switch]$WhisperTiny,
-    [switch]$NoTts
+    [switch]$NoTts,
+    [switch]$NoEmbedding
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,6 +37,11 @@ $WHISPER_MODEL = "J:\Modelos LLM\manifests\registry.ollama.ai\library\whisper\gg
 $WHISPER_MODEL_TINY = "J:\Modelos LLM\manifests\registry.ollama.ai\library\whisper\ggml-tiny.bin"
 $WHISPER_PORT  = 8081
 $WHISPER_THREADS = 4
+
+# Embedding (BGE-M3)
+$EMBED_MODEL = "J:\Modelos LLM\manifests\registry.ollama.ai\library\Embadding\bge-m3-Q4_K_M.gguf"
+$EMBED_PORT = 8082
+$EMBED_THREADS = 4
 
 # Chatterbox TTS (chatterbox-tts-api com modelo multilingual PT-BR)
 $CHATTERBOX_PORT = 8005
@@ -380,7 +386,27 @@ if ($NoWhisper) {
     Write-Host "[Whisper] Compile com: git clone https://github.com/ggerganov/whisper.cpp && cd whisper.cpp && cmake -B build && cmake --build build --config Release" -ForegroundColor Gray
 }
 
-# 3. Chatterbox TTS (chatterbox-tts-api multilingual)
+# 3. Embedding (BGE-M3)
+if ($NoEmbedding) {
+    Write-Host "[Embedding] Ignorado por parametro -NoEmbedding" -ForegroundColor Yellow
+} elseif (Test-Path $EMBED_MODEL) {
+    $embedArgs = @(
+        "-m `"$EMBED_MODEL`"",
+        "--embeddings",
+        "--port $EMBED_PORT",
+        "--host 127.0.0.1",
+        "-ngl 0",
+        "-c 512",
+        "-t $EMBED_THREADS"
+    ) -join " "
+    Start-Server -Name "Embedding" -Exe $LLAMA_SERVER -ServerArgs $embedArgs -Port $EMBED_PORT -Priority "BelowNormal"
+} else {
+    Write-Host "[Embedding] Modelo BGE-M3 nao encontrado em: $EMBED_MODEL" -ForegroundColor Yellow
+    Write-Host "[Embedding] Baixe com .\download-bge-m3.ps1" -ForegroundColor Gray
+    Write-Host "[Embedding] O RAG usara o LLM principal como fallback." -ForegroundColor Gray
+}
+
+# 4. Chatterbox TTS (chatterbox-tts-api multilingual)
 if ($NoTts) {
     Write-Host "[TTS] Ignorado por parametro -NoTts" -ForegroundColor Yellow
 } elseif ($TTS_MODE -eq "windows") {
@@ -510,7 +536,7 @@ if ($NoTts) {
     Write-Host "[TTS] Assumindo que TTS esta rodando externamente na porta $CHATTERBOX_PORT" -ForegroundColor Gray
 }
 
-# 4. Voice Assistant
+# 5. Voice Assistant
 if (-not $KeepStaleFrontend -and (Test-PortListening -Port $VITE_PORT)) {
     Stop-PortListeners -Port $VITE_PORT -Name "App/Vite" -OnlyNode
 }
@@ -527,9 +553,20 @@ Write-Host "[App] Iniciando Voice Assistant..." -ForegroundColor Cyan
 Write-Host "[App] Segure Shift+Z para falar, Shift+X para fechar." -ForegroundColor Gray
 Write-Host "[App] Pressione Ctrl+C para encerrar tudo.`n" -ForegroundColor Gray
 
+# Tauri `AppHandle::restart()` termina o binario com RESTART_EXIT_CODE (= [int32]::MaxValue).
+# Sem este ciclo, o `finally` abaixo corria na 1ª saida e `Stop-AllServers` matava LLM/Whisper/Vite.
+$TauriRestartExitCode = [int32]::MaxValue
+
 Push-Location $APP_DIR
 try {
-    npx tauri dev
+    do {
+        npx tauri dev
+        $tauriDevExit = $LASTEXITCODE
+        if ($tauriDevExit -eq $TauriRestartExitCode) {
+            Write-Host "`n[App] Reinicio do Chronos (atalhos/config) — a reabrir o assistente sem encerrar os servidores (LLM, Whisper, TTS...)." -ForegroundColor Cyan
+            Start-Sleep -Seconds 1
+        }
+    } while ($tauriDevExit -eq $TauriRestartExitCode)
 } finally {
     Pop-Location
     Stop-AllServers

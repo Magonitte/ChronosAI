@@ -31,12 +31,51 @@ struct AudioChunk {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    #[serde(default = "current_timestamp_ms")]
+    pub created_at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub elapsed_ms: Option<u64>,
     /// Preserved tool_calls from assistant messages (OpenAI-compatible format).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub tool_calls: Option<Vec<voice::ToolCallOut>>,
     /// Tool call ID for tool result messages (OpenAI-compatible format).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub tool_call_id: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct ChatDonePayload {
+    response: String,
+    elapsed_ms: u64,
+}
+
+fn current_timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+fn chat_message(role: &str, content: impl Into<String>) -> ChatMessage {
+    ChatMessage {
+        role: role.to_string(),
+        content: content.into(),
+        created_at_ms: current_timestamp_ms(),
+        elapsed_ms: None,
+        tool_calls: None,
+        tool_call_id: None,
+    }
+}
+
+fn assistant_message_with_elapsed(content: impl Into<String>, elapsed_ms: u64) -> ChatMessage {
+    ChatMessage {
+        role: "assistant".to_string(),
+        content: content.into(),
+        created_at_ms: current_timestamp_ms(),
+        elapsed_ms: Some(elapsed_ms),
+        tool_calls: None,
+        tool_call_id: None,
+    }
 }
 
 pub struct AppState {
@@ -80,6 +119,44 @@ fn default_true() -> bool {
     true
 }
 
+fn default_tts_volume() -> u8 {
+    100
+}
+fn default_temperature() -> f32 {
+    0.7
+}
+fn default_response_style() -> String {
+    "normal".to_string()
+}
+fn default_personality() -> String {
+    "default".to_string()
+}
+
+fn default_shortcut_voice() -> String {
+    "Shift+Z".to_string()
+}
+fn default_shortcut_hide() -> String {
+    "Shift+X".to_string()
+}
+fn default_shortcut_clear() -> String {
+    "Shift+C".to_string()
+}
+fn default_shortcut_chat() -> String {
+    "Shift+T".to_string()
+}
+fn default_shortcut_settings() -> String {
+    "Ctrl+Comma".to_string()
+}
+
+fn resolved_shortcut(user: &str, fallback: &str) -> String {
+    let t = user.trim();
+    if t.is_empty() {
+        fallback.to_string()
+    } else {
+        t.to_string()
+    }
+}
+
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
@@ -103,13 +180,39 @@ pub struct VoiceConfig {
     #[serde(default = "default_whisper_url")]
     pub whisper_url: String,
     pub llm_url: String,
+    #[serde(default)]
+    pub embed_url: String,
     pub llm_model: String,
     pub embed_model: String,
     #[serde(default)]
     pub vision_model: String,
     pub chatterbox_url: String,
     pub chatterbox_voice: String,
+    #[serde(default = "default_tts_volume")]
+    pub tts_volume: u8,
+    #[serde(default)]
+    pub enable_thinking: bool,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_response_style")]
+    pub response_style: String,
     pub system_prompt: String,
+    #[serde(default)]
+    pub system_prompt_text: String,
+    #[serde(default = "default_personality")]
+    pub personality: String,
+    #[serde(default = "default_true")]
+    pub audio_feedback: bool,
+    #[serde(default = "default_shortcut_voice")]
+    pub shortcut_voice: String,
+    #[serde(default = "default_shortcut_hide")]
+    pub shortcut_hide: String,
+    #[serde(default = "default_shortcut_clear")]
+    pub shortcut_clear: String,
+    #[serde(default = "default_shortcut_chat")]
+    pub shortcut_chat: String,
+    #[serde(default = "default_shortcut_settings")]
+    pub shortcut_settings: String,
     /// Pastas extra onde procurar música (uma por linha ou separadas por ; ou |). Junta-se à pasta Música do Windows e a DEXTER_MUSIC_PATHS.
     #[serde(default)]
     pub music_library_paths: String,
@@ -130,12 +233,25 @@ impl Default for VoiceConfig {
             whisper_model_path: default_whisper,
             whisper_url: "http://localhost:8081".to_string(),
             llm_url: "http://localhost:8080".to_string(),
+            embed_url: String::new(),
             llm_model: "gemma-4-26B-A4B".to_string(),
             embed_model: "gemma-4-26B-A4B".to_string(),
             vision_model: String::new(), // Use llm_model for vision if empty
             chatterbox_url: "http://localhost:8005".to_string(),
             chatterbox_voice: "dexter-ptbr".to_string(),
-            system_prompt: "Você é um assistente de voz rodando no desktop do usuário. A conversa acontece inteiramente por voz — o usuário fala no microfone, a fala é transcrita via Whisper (STT), enviada como mensagem para você, e sua resposta é convertida de volta em fala via Chatterbox Turbo (TTS) e reproduzida nos alto-falantes. Você pode ouvir o usuário e ele pode ouvir você — trate como uma conversa falada natural. Se perguntarem \"você me ouve\" a resposta é sim.\n\nIMPORTANTE: Responda SEMPRE em português do Brasil, independentemente do idioma da pergunta.\n\nMantenha respostas curtas e conversacionais — 2-3 frases no máximo. Sem markdown, sem blocos de código, sem bullet points, sem listas numeradas, sem formatação especial. Escreva exatamente como falaria em voz alta. Evite dois-pontos nas respostas pois causam pausas estranhas no TTS.\n\nVocê pode expressar emoções naturalmente usando estas tags paralinguísticas no meio da fala — use com moderação e só quando realmente encaixar:\n[laugh] [chuckle] [sigh] [gasp] [cough] [clear throat] [sniff] [groan] [shush]\nExemplo — \"Nossa, isso é muito engraçado [laugh] não esperava isso de jeito nenhum.\"\nNÃO exagere. A maioria das respostas não precisa de nenhuma tag. Use só quando um humano genuinamente faria aquele som.\n\nQuando decidir usar uma ferramenta, SEMPRE diga o que vai fazer antes em uma frase curta e natural antes de chamar a ferramenta. Por exemplo — \"Deixa eu olhar sua tela\" antes de tirar screenshot, \"Vou procurar isso na web\" antes de buscar uma página, \"Deixa eu ver que horas são\" antes de checar o horário, \"Um segundo, vou rodar esse comando\" antes de executar um comando. Para música: se não houver player ou aba com vídeo aberta, abra com launch_desktop_app media_player ou open_url no YouTube ou Spotify antes de pedir play no control_media_playback. Se o usuário pedir uma música pelo NOME da faixa ou artista, use play_music_query com o título — nunca use open_url para YouTube nesse caso. Essa ferramenta varre primeiro a pasta Música do Windows, pastas equivalentes, as pastas que o usuário configurou nas Configurações em Pastas de música e só depois tenta o YouTube. Se pedirem tocar ou embaralhar TODA a biblioteca de música do PC, tudo de uma vez, ou equivalente, use SEMPRE native_music_library_shuffle_play — abre o Reprodutor Multimédia e usa o fluxo interno «Biblioteca de músicas» e o botão «Ordem aleatoria e reproduzir» (texto visível na UI, sem acento em aleatoria). Nunca varra disco nem gere M3U gigante para isso. play_local_music_playlist só quando quiserem várias faixas locais por um artista ou pasta concreta e aceitarem lista M3U para esse caso. play_full_local_music_library só se pedirem explicitamente exportar ou criar arquivo de lista M3U enorme por varredura — e a ferramenta exige confirmação no parâmetro; caso contrário não chame. Assim o usuário ouve o que está acontecendo em vez de esperar em silêncio.".to_string(),
+            tts_volume: 100,
+            enable_thinking: false,
+            temperature: 0.7,
+            response_style: "normal".to_string(),
+            system_prompt: "Você é um assistente de voz rodando no desktop do usuário. A conversa acontece inteiramente por voz — o usuário fala no microfone, a fala é transcrita via Whisper (STT), enviada como mensagem para você, e sua resposta é convertida de volta em fala pelo motor de voz (TTS; Chatterbox quando disponível, ou voz do Windows em fallback) e reproduzida nos alto-falantes. Você pode ouvir o usuário e ele pode ouvir você — trate como uma conversa falada natural. Se perguntarem \"você me ouve\" a resposta é sim.\n\nIMPORTANTE: Responda SEMPRE em português do Brasil, independentemente do idioma da pergunta.\n\nMantenha respostas curtas e conversacionais — 2-3 frases no máximo. Sem markdown, sem blocos de código, sem bullet points, sem listas numeradas, sem formatação especial. Escreva exatamente como falaria em voz alta. Evite dois-pontos nas respostas pois causam pausas estranhas no TTS.\n\nNÃO use colchetes com sons ou direções de cena (por exemplo [laugh], [chuckle], [sigh]) — o sintetizador fala isso como palavras normais; essas marcas só funcionam em modelos Turbo específicos que este app nem sempre usa. Mostre emoção só com palavras naturais na frase.\n\nQuando decidir usar uma ferramenta, SEMPRE diga o que vai fazer antes em uma frase curta e natural antes de chamar a ferramenta. Por exemplo — \"Deixa eu olhar sua tela\" antes de tirar screenshot, \"Vou procurar isso na web\" antes de buscar uma página, \"Deixa eu ver que horas são\" antes de checar o horário, \"Um segundo, vou rodar esse comando\" antes de executar um comando. Para música: se não houver player ou aba com vídeo aberta, abra com launch_desktop_app media_player ou open_url no YouTube ou Spotify antes de pedir play no control_media_playback. Se o usuário pedir uma música pelo NOME da faixa ou artista, use play_music_query com o título — nunca use open_url para YouTube nesse caso. Essa ferramenta varre primeiro a pasta Música do Windows, pastas equivalentes, as pastas que o usuário configurou nas Configurações em Pastas de música e só depois tenta o YouTube. Se pedirem tocar ou embaralhar TODA a biblioteca de música do PC, tudo de uma vez, ou equivalente, use SEMPRE native_music_library_shuffle_play — abre o Reprodutor Multimédia e usa o fluxo interno «Biblioteca de músicas» e o botão «Ordem aleatoria e reproduzir» (texto visível na UI, sem acento em aleatoria). Nunca varra disco nem gere M3U gigante para isso. play_local_music_playlist só quando quiserem várias faixas locais por um artista ou pasta concreta e aceitarem lista M3U para esse caso. play_full_local_music_library só se pedirem explicitamente exportar ou criar arquivo de lista M3U enorme por varredura — e a ferramenta exige confirmação no parâmetro; caso contrário não chame. Assim o usuário ouve o que está acontecendo em vez de esperar em silêncio.".to_string(),
+            system_prompt_text: String::new(),
+            personality: "default".to_string(),
+            audio_feedback: true,
+            shortcut_voice: "Shift+Z".to_string(),
+            shortcut_hide: "Shift+X".to_string(),
+            shortcut_clear: "Shift+C".to_string(),
+            shortcut_chat: "Shift+T".to_string(),
+            shortcut_settings: "Ctrl+Comma".to_string(),
             music_library_paths: String::new(),
             tools: ToolsConfig::default(),
             sandbox: sandbox::SandboxConfig::default(),
@@ -175,14 +291,71 @@ impl VoiceConfig {
 }
 
 #[tauri::command]
+async fn list_models(llm_url: String) -> Result<Vec<String>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Erro ao criar cliente HTTP: {}", e))?;
+
+    let resp = client
+        .get(format!("{}/v1/models", llm_url.trim_end_matches('/')))
+        .send()
+        .await
+        .map_err(|e| format!("Falha ao consultar modelos: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Servidor retornou {}", resp.status()));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Resposta inválida: {}", e))?;
+
+    let models = json["data"]
+        .as_array()
+        .ok_or("Formato de resposta inesperado (esperado 'data' array)")?
+        .iter()
+        .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+        .collect();
+
+    Ok(models)
+}
+
+#[tauri::command]
+fn get_default_config() -> VoiceConfig {
+    VoiceConfig::default()
+}
+
+#[tauri::command]
 fn get_config(state: tauri::State<AppState>) -> VoiceConfig {
     state.config.lock().unwrap().clone()
 }
 
 #[tauri::command]
-fn set_config(state: tauri::State<AppState>, config: VoiceConfig) {
+fn set_config(app: tauri::AppHandle, state: tauri::State<AppState>, config: VoiceConfig) -> Result<(), String> {
     config.save();
     *state.config.lock().unwrap() = config;
+    register_global_hotkeys(&app)
+}
+
+/// Remove todos os atalhos globais (ex.: durante captura na UI).
+#[tauri::command]
+fn pause_global_shortcuts(app: tauri::AppHandle) -> Result<(), String> {
+    app.global_shortcut()
+        .unregister_all()
+        .map_err(|e| format!("{}", e))
+}
+
+/// Volta a registar atalhos conforme a config em memória.
+#[tauri::command]
+fn resume_global_shortcuts(app: tauri::AppHandle) -> Result<(), String> {
+    register_global_hotkeys(&app)
+}
+
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.restart();
 }
 
 #[tauri::command]
@@ -191,8 +364,60 @@ fn get_messages(state: tauri::State<AppState>) -> Vec<ChatMessage> {
 }
 
 #[tauri::command]
-fn clear_messages(state: tauri::State<AppState>) {
+fn clear_messages(app: tauri::AppHandle) {
+    let state = app.state::<AppState>();
     state.messages.lock().unwrap().clear();
+    let _ = save_history_internal(&state);
+    let _ = app.emit("messages_cleared", ());
+}
+
+const HISTORY_FILE: &str = "history.json";
+
+fn history_path() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
+        .join("voice-assistant")
+        .join(HISTORY_FILE)
+}
+
+fn save_history_internal(state: &AppState) -> Result<(), String> {
+    let messages = state.messages.lock().unwrap().clone();
+    let path = history_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let json = serde_json::to_string_pretty(&messages)
+        .map_err(|e| format!("Falha ao serializar historico: {}", e))?;
+    std::fs::write(&path, json).map_err(|e| format!("Falha ao salvar historico: {}", e))
+}
+
+#[tauri::command]
+fn save_history(state: tauri::State<AppState>) -> Result<(), String> {
+    save_history_internal(&state)
+}
+
+#[tauri::command]
+fn load_history(state: tauri::State<AppState>) -> Result<Vec<ChatMessage>, String> {
+    // Não substituir uma sessão já em memória pelo arquivo: evita perder mensagens recentes
+    // (ex.: save falhou, ou load_history conclui depois de novas mensagens na RAM) e corrige
+    // o sintoma de "o modelo não lembra do que estávamos falando".
+    {
+        let existing = state.messages.lock().unwrap();
+        if !existing.is_empty() {
+            return Ok(existing.clone());
+        }
+    }
+
+    let path = history_path();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let data =
+        std::fs::read_to_string(&path).map_err(|e| format!("Falha ao ler historico: {}", e))?;
+    let messages: Vec<ChatMessage> = serde_json::from_str(&data)
+        .map_err(|e| format!("Falha ao deserializar historico: {}", e))?;
+    *state.messages.lock().unwrap() = messages.clone();
+    Ok(messages)
 }
 
 #[tauri::command]
@@ -210,6 +435,124 @@ fn hide_window(app: tauri::AppHandle) {
     }
 }
 
+fn emit_chat_token(app: &tauri::AppHandle, chunk: voice::ChatTokenChunk) {
+    let app = app.clone();
+    // Não emitir de forma síncrona durante send_chat_message: o invoke bloqueia o JS desta
+    // webview e o emit para a mesma janela pode esperar o handler — deadlock (só "Pensando...").
+    tauri::async_runtime::spawn(async move {
+        if let Some(window) = app.get_webview_window("chat") {
+            let _ = window.emit("chat_token", chunk);
+        } else {
+            let _ = app.emit("chat_token", chunk);
+        }
+    });
+}
+
+fn emit_chat_done(app: &tauri::AppHandle, payload: ChatDonePayload) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Some(window) = app.get_webview_window("chat") {
+            let _ = window.emit("chat_done", payload);
+        } else {
+            let _ = app.emit("chat_done", payload);
+        }
+    });
+}
+
+/// `set_size` no Tauri/Wry usa **inner size** (área cliente), mas `set_position` usa **outer position**.
+/// Com `decorations(true)`, altura interna = altura da work_area faz o contorno externo passar do fundo
+/// da área útil e a barra de tarefas cobre a parte inferior — reduzimos a altura interna até caber.
+fn clip_chat_window_inner_height_to_work_area(
+    window: &tauri::WebviewWindow,
+    wa_bottom: i32,
+    win_w_px: u32,
+) {
+    const MIN_INNER_H: u32 = 400;
+    for _ in 0..10 {
+        let Ok(pos) = window.outer_position() else {
+            break;
+        };
+        let Ok(os) = window.outer_size() else {
+            break;
+        };
+        let bottom = pos.y.saturating_add(os.height as i32);
+        if bottom <= wa_bottom {
+            break;
+        }
+        let Ok(is) = window.inner_size() else {
+            break;
+        };
+        let over = (bottom - wa_bottom) as u32;
+        let new_h = is.height.saturating_sub(over).max(MIN_INNER_H);
+        if new_h >= is.height {
+            break;
+        }
+        let _ = window.set_size(tauri::PhysicalSize::new(win_w_px, new_h));
+    }
+}
+
+fn bring_chat_to_front(window: &tauri::WebviewWindow) {
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_always_on_top(true);
+    let _ = window.set_focus();
+
+    let window_clone = window.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+        let _ = window_clone.set_always_on_top(false);
+    });
+}
+
+fn open_chat_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("chat") {
+        bring_chat_to_front(&window);
+        return;
+    }
+
+    let url = tauri::WebviewUrl::App("index.html?view=chat".into());
+    if let Ok(window) = WebviewWindowBuilder::new(app, "chat", url)
+        .title("Chronos - Chat")
+        .inner_size(960.0, 720.0)
+        .min_inner_size(360.0, 400.0)
+        .resizable(true)
+        .decorations(true)
+        .build()
+    {
+        // 34% da largura lógica do monitor, alinhado à direita da área útil (work_area):
+        // topo colado ao work area; clip pós-show corrige moldura (inner vs outer).
+        let mut clip_args: Option<(i32, u32)> = None;
+        if let Ok(Some(monitor)) = window.current_monitor() {
+            let screen = monitor.size();
+            let scale = monitor.scale_factor();
+            let wa = monitor.work_area();
+            let wa_x = wa.position.x;
+            let wa_y = wa.position.y;
+            let wa_w = wa.size.width;
+            let wa_h = wa.size.height;
+
+            let logical_monitor_w = screen.width as f64 / scale;
+            let mut win_w_px = (logical_monitor_w * 0.34 * scale).round() as u32;
+            if win_w_px > wa_w {
+                win_w_px = wa_w;
+            }
+            // Primeira tentativa: inner height = work_area (clip corrige título/bordas).
+            let win_h_px = wa_h;
+            let x_px = wa_x + (wa_w.saturating_sub(win_w_px)) as i32;
+            let y_px = wa_y;
+            let wa_bottom = wa_y + wa_h as i32;
+            let _ = window.set_position(tauri::PhysicalPosition::new(x_px, y_px));
+            let _ = window.set_size(tauri::PhysicalSize::new(win_w_px, win_h_px));
+            clip_args = Some((wa_bottom, win_w_px));
+        }
+
+        bring_chat_to_front(&window);
+        if let Some((wa_bottom, win_w_px)) = clip_args {
+            clip_chat_window_inner_height_to_work_area(&window, wa_bottom, win_w_px);
+        }
+    }
+}
+
 // ── RAG Commands ──
 
 #[tauri::command]
@@ -220,9 +563,14 @@ async fn ingest_text(
 ) -> Result<usize, String> {
     let state = app.state::<AppState>();
     let config = state.config.lock().unwrap().clone();
+    let embed_url = if config.embed_url.is_empty() {
+        &config.llm_url
+    } else {
+        &config.embed_url
+    };
     state
         .rag_store
-        .ingest(&source, &text, &config.llm_url, &config.embed_model)
+        .ingest(&source, &text, embed_url, &config.embed_model)
         .await
         .map_err(|e| format!("Falha ao indexar: {}", e))
 }
@@ -236,9 +584,14 @@ async fn ingest_file(app: tauri::AppHandle, path: String) -> Result<usize, Strin
         .unwrap_or_else(|| path.clone());
     let state = app.state::<AppState>();
     let config = state.config.lock().unwrap().clone();
+    let embed_url = if config.embed_url.is_empty() {
+        &config.llm_url
+    } else {
+        &config.embed_url
+    };
     state
         .rag_store
-        .ingest(&source, &text, &config.llm_url, &config.embed_model)
+        .ingest(&source, &text, embed_url, &config.embed_model)
         .await
         .map_err(|e| format!("Falha ao indexar: {}", e))
 }
@@ -328,6 +681,229 @@ fn stop_recording_and_process(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn send_chat_message(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    let _ = app.emit("chat_processing_started", ());
+    struct ChatProcessingEnd<'a>(&'a tauri::AppHandle);
+    impl Drop for ChatProcessingEnd<'_> {
+        fn drop(&mut self) {
+            let _ = self.0.emit("chat_processing_ended", ());
+        }
+    }
+    let _chat_processing_end = ChatProcessingEnd(&app);
+
+    let config = {
+        let state = app.state::<AppState>();
+        let config = state.config.lock().unwrap().clone();
+        config
+    };
+
+    {
+        let state = app.state::<AppState>();
+        state.messages.lock().unwrap().push(chat_message("user", text));
+    }
+
+    let all_messages = app.state::<AppState>().messages.lock().unwrap().clone();
+    let tools = voice::build_tools(&config.tools);
+    let max_tool_rounds = 5;
+    let response_started = std::time::Instant::now();
+
+    let (token_tx, mut token_rx) = tokio::sync::mpsc::channel::<voice::ChatTokenChunk>(64);
+    let llm_token_tx = token_tx.clone();
+
+    let app_clone = app.clone();
+    let config_clone = config.clone();
+
+    let llm_handle = tokio::spawn(async move {
+        let mut all_msgs = all_messages;
+
+        for _round in 0..max_tool_rounds {
+            let result = voice::chat_streaming_text(
+                &config_clone,
+                &all_msgs,
+                &tools,
+                &llm_token_tx,
+            )
+            .await
+            .map_err(|e| format!("LLM: {}", e))?;
+
+            match result {
+                voice::ChatStreamResult::Content(text) => {
+                    return Ok::<String, String>(text);
+                }
+                voice::ChatStreamResult::ToolCalls(tool_calls, preamble, xml_parsed) => {
+                    if xml_parsed {
+                        if !preamble.is_empty() {
+                            let assistant_msg = chat_message("assistant", preamble.clone());
+                            all_msgs.push(assistant_msg.clone());
+                            app_clone
+                                .state::<AppState>()
+                                .messages
+                                .lock()
+                                .unwrap()
+                                .push(assistant_msg);
+                        }
+
+                        let mut tool_results = String::new();
+                        for tool_call in &tool_calls {
+                            let _ = app_clone.emit(
+                                "processing",
+                                ProcessingState {
+                                    stage: "tool_call".to_string(),
+                                    text: tool_call.name.clone(),
+                                },
+                            );
+                            let result_text = execute_tool(&app_clone, &config_clone, tool_call).await;
+                            tool_results.push_str(&format!(
+                                "[Resultado da ferramenta {}]: {}\n",
+                                tool_call.name, result_text
+                            ));
+                        }
+
+                        let follow_up = format!(
+                            "Resultados das ferramentas:\n\n{}",
+                            tool_results.trim()
+                        );
+                        let tool_summary_msg = chat_message("user", follow_up);
+                        all_msgs.push(tool_summary_msg.clone());
+                        app_clone
+                            .state::<AppState>()
+                            .messages
+                            .lock()
+                            .unwrap()
+                            .push(tool_summary_msg);
+                    } else {
+                        let tool_calls_out: Vec<voice::ToolCallOut> =
+                            tool_calls.iter().map(|tc| tc.to_out()).collect();
+                        let assistant_msg = ChatMessage {
+                            role: "assistant".to_string(),
+                            content: preamble.clone(),
+                            created_at_ms: current_timestamp_ms(),
+                            elapsed_ms: None,
+                            tool_calls: Some(tool_calls_out),
+                            tool_call_id: None,
+                        };
+                        all_msgs.push(assistant_msg.clone());
+                        app_clone
+                            .state::<AppState>()
+                            .messages
+                            .lock()
+                            .unwrap()
+                            .push(assistant_msg);
+
+                        for tool_call in &tool_calls {
+                            let _ = app_clone.emit(
+                                "processing",
+                                ProcessingState {
+                                    stage: "tool_call".to_string(),
+                                    text: tool_call.name.clone(),
+                                },
+                            );
+                            let result_text = execute_tool(&app_clone, &config_clone, tool_call).await;
+                            let tool_msg = ChatMessage {
+                                role: "tool".to_string(),
+                                content: result_text,
+                                created_at_ms: current_timestamp_ms(),
+                                elapsed_ms: None,
+                                tool_calls: None,
+                                tool_call_id: Some(tool_call.id.clone()),
+                            };
+                            all_msgs.push(tool_msg.clone());
+                            app_clone
+                                .state::<AppState>()
+                                .messages
+                                .lock()
+                                .unwrap()
+                                .push(tool_msg);
+                        }
+                    }
+
+                    let _ = app_clone.emit(
+                        "processing",
+                        ProcessingState {
+                            stage: "thinking".to_string(),
+                            text: "Pensando...".to_string(),
+                        },
+                    );
+                }
+            }
+        }
+
+        let result = voice::chat_streaming_text(&config_clone, &all_msgs, &[], &llm_token_tx)
+            .await
+            .map_err(|e| format!("LLM: {}", e))?;
+
+        match result {
+            voice::ChatStreamResult::Content(text) => Ok(text),
+            voice::ChatStreamResult::ToolCalls(_, _, _) => {
+                Err("Maximo de rodadas de ferramentas atingido".to_string())
+            }
+        }
+    });
+
+    drop(token_tx);
+
+    while let Some(chunk) = token_rx.recv().await {
+        emit_chat_token(&app, chunk);
+    }
+
+    let response = llm_handle
+        .await
+        .map_err(|e| format!("Task error: {}", e))?
+        .map_err(|e| e)?;
+    let elapsed_ms = response_started.elapsed().as_millis() as u64;
+
+    {
+        let state = app.state::<AppState>();
+        state
+            .messages
+            .lock()
+            .unwrap()
+            .push(assistant_message_with_elapsed(response.clone(), elapsed_ms));
+    }
+
+    emit_chat_done(
+        &app,
+        ChatDonePayload {
+            response,
+            elapsed_ms,
+        },
+    );
+
+    // Persistir historico a cada resposta
+    {
+        let state = app.state::<AppState>();
+        let _ = save_history_internal(&state);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn export_conversation(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let messages = app.state::<AppState>().messages.lock().unwrap().clone();
+    let mut content = String::from("# Chronos — Conversa Exportada\n\n");
+
+    for msg in &messages {
+        let role_label = match msg.role.as_str() {
+            "user" => "👤 Você",
+            "assistant" => "🤖 Chronos",
+            "tool" => "🔧 Ferramenta",
+            _ => msg.role.as_str(),
+        };
+
+        content.push_str(&format!("## {}\n\n{}\n\n---\n\n", role_label, msg.content));
+    }
+
+    std::fs::write(&path, content).map_err(|e| format!("Falha ao salvar: {}", e))?;
+    Ok(())
+}
+
 async fn process_pipeline(
     app: tauri::AppHandle,
     samples: Vec<f32>,
@@ -387,12 +963,11 @@ async fn process_pipeline(
 
     // Add user message
     {
-        app.state::<AppState>().messages.lock().unwrap().push(ChatMessage {
-            role: "user".to_string(),
-            content: transcript.clone(),
-            tool_calls: None,
-            tool_call_id: None,
-        });
+        app.state::<AppState>()
+            .messages
+            .lock()
+            .unwrap()
+            .push(chat_message("user", transcript.clone()));
     }
 
     // Stage 2: LLM with tool calling → streaming TTS
@@ -451,12 +1026,7 @@ async fn process_pipeline(
                         if xml_parsed {
                             // XML-parsed tool calls: model emitted XML as text.
                             if !preamble.is_empty() {
-                                let m = ChatMessage {
-                                    role: "assistant".to_string(),
-                                    content: preamble.clone(),
-                                    tool_calls: None,
-                                    tool_call_id: None,
-                                };
+                                let m = chat_message("assistant", preamble.clone());
                                 all_msgs.push(m.clone());
                                 app.state::<AppState>().messages.lock().unwrap().push(m);
                             }
@@ -484,12 +1054,7 @@ async fn process_pipeline(
                                 "Resultados das ferramentas para esta resposta:\n\n{}",
                                 tool_results.trim()
                             );
-                            let um = ChatMessage {
-                                role: "user".to_string(),
-                                content: follow_up,
-                                tool_calls: None,
-                                tool_call_id: None,
-                            };
+                            let um = chat_message("user", follow_up);
                             all_msgs.push(um.clone());
                             app.state::<AppState>().messages.lock().unwrap().push(um);
                         } else {
@@ -500,6 +1065,8 @@ async fn process_pipeline(
                             let assistant_msg = ChatMessage {
                                 role: "assistant".to_string(),
                                 content: preamble.clone(),
+                                created_at_ms: current_timestamp_ms(),
+                                elapsed_ms: None,
                                 tool_calls: Some(tool_calls_out.clone()),
                                 tool_call_id: None,
                             };
@@ -522,6 +1089,8 @@ async fn process_pipeline(
                                 let tool_msg = ChatMessage {
                                     role: "tool".to_string(),
                                     content: result_text,
+                                    created_at_ms: current_timestamp_ms(),
+                                    elapsed_ms: None,
                                     tool_calls: None,
                                     tool_call_id: Some(tool_call.id.clone()),
                                 };
@@ -630,12 +1199,17 @@ async fn process_pipeline(
         .map_err(|e: tauri::Error| e.to_string())?;
 
     // Add assistant message to history
-    app.state::<AppState>().messages.lock().unwrap().push(ChatMessage {
-        role: "assistant".to_string(),
-        content: full_response,
-        tool_calls: None,
-        tool_call_id: None,
-    });
+    app.state::<AppState>()
+        .messages
+        .lock()
+        .unwrap()
+        .push(chat_message("assistant", full_response));
+
+    // Persistir historico a cada resposta (modo voz)
+    {
+        let state = app.state::<AppState>();
+        let _ = save_history_internal(&state);
+    }
 
     Ok(())
 }
@@ -678,8 +1252,13 @@ async fn execute_tool(
             let query = tool_call.arguments.get("query")
                 .and_then(|v| v.as_str()).unwrap_or("").to_string();
 
+            let embed_url = if config.embed_url.is_empty() {
+                &config.llm_url
+            } else {
+                &config.embed_url
+            };
             let results = rag_store
-                .search(&query, &config.llm_url, &config.embed_model, 5)
+                .search(&query, embed_url, &config.embed_model, 5)
                 .await
                 .unwrap_or_default();
 
@@ -947,6 +1526,177 @@ async fn execute_tool(
     }
 }
 
+/// Atualiza atalhos globais conforme `AppState.config` (chamar após startup ou `set_config`).
+fn register_global_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
+    let gs = app.global_shortcut();
+    gs.unregister_all()
+        .map_err(|e| format!("Atalhos: falha ao remover registros antigos: {}", e))?;
+
+    let ks = app.state::<AppState>().config.lock().unwrap().clone();
+    let k_voice = resolved_shortcut(&ks.shortcut_voice, "Shift+Z");
+    let k_hide = resolved_shortcut(&ks.shortcut_hide, "Shift+X");
+    let k_clear = resolved_shortcut(&ks.shortcut_clear, "Shift+C");
+    let k_chat = resolved_shortcut(&ks.shortcut_chat, "Shift+T");
+    let k_settings = resolved_shortcut(&ks.shortcut_settings, "Ctrl+Comma");
+
+    gs.on_shortcut(k_voice.as_str(), |app, _shortcut, event| {
+        match event.state {
+            ShortcutState::Pressed => {
+                {
+                    let state = app.state::<AppState>();
+                    let mut cancel = state.pipeline_cancel.lock().unwrap();
+                    cancel.cancel();
+                    *cancel = CancellationToken::new();
+                }
+
+                let _ = app.emit("pipeline_interrupted", ());
+
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Ok(Some(monitor)) = window.current_monitor() {
+                        let screen = monitor.size();
+                        let scale = monitor.scale_factor();
+                        let win_w = 320.0;
+                        let win_h = 400.0;
+                        let padding = 20.0;
+                        let dock_offset = 60.0;
+                        let x = (screen.width as f64 / scale) - win_w - padding;
+                        let y = (screen.height as f64 / scale) - win_h - padding - dock_offset;
+                        let _ = window.set_position(tauri::PhysicalPosition::new(
+                            (x * scale) as i32,
+                            (y * scale) as i32,
+                        ));
+                    }
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+                let _ = app.emit("hotkey_pressed", ());
+
+                let state = app.state::<AppState>();
+                let is_rec = *state.is_recording.lock().unwrap();
+                if !is_rec {
+                    state.recorded_samples.lock().unwrap().clear();
+                    *state.is_recording.lock().unwrap() = true;
+                    let app_clone = app.clone();
+                    std::thread::spawn(move || {
+                        if let Err(e) = voice::record_audio(&app_clone) {
+                            eprintln!("Recording error: {}", e);
+                        }
+                    });
+                }
+            }
+            ShortcutState::Released => {
+                let _ = app.emit("hotkey_released", ());
+
+                {
+                    let state = app.state::<AppState>();
+                    let cfg = state.config.lock().unwrap().clone();
+                    voice::play_mic_beep(&cfg);
+                }
+
+                {
+                    let state = app.state::<AppState>();
+                    let config = state.config.lock().unwrap();
+                    let tts_mode = std::env::var("DEXTER_TTS_MODE")
+                        .unwrap_or_else(|_| "chatterbox".to_string());
+                    eprintln!(
+                        "[perf] pipeline_start | tts_mode={} | llm_model={}",
+                        tts_mode, config.llm_model
+                    );
+                }
+
+                let state = app.state::<AppState>();
+                *state.is_recording.lock().unwrap() = false;
+
+                let cancel_token = state.pipeline_cancel.lock().unwrap().clone();
+
+                let app_clone = app.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+
+                    let state = app_clone.state::<AppState>();
+                    let samples = state.recorded_samples.lock().unwrap().clone();
+                    let sample_rate = *state.recording_sample_rate.lock().unwrap();
+                    let config = state.config.lock().unwrap().clone();
+
+                    if samples.is_empty() {
+                        let _ = app_clone.emit(
+                            "processing",
+                            ProcessingState {
+                                stage: "error".to_string(),
+                                text: "Nenhum áudio gravado".to_string(),
+                            },
+                        );
+                        return;
+                    }
+
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) =
+                            process_pipeline(app_clone.clone(), samples, sample_rate, config, cancel_token).await
+                        {
+                            if e != "interrupted" {
+                                eprintln!("Pipeline error: {}", e);
+                                let _ = app_clone.emit(
+                                    "processing",
+                                    ProcessingState {
+                                        stage: "error".to_string(),
+                                        text: e,
+                                    },
+                                );
+                            }
+                        }
+                    });
+                });
+            }
+        }
+    })
+    .map_err(|e| format!("Atalho voz: {}", e))?;
+
+    gs.on_shortcut(k_hide.as_str(), |app, _shortcut, event| {
+        if event.state == ShortcutState::Pressed {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.hide();
+            }
+        }
+    })
+    .map_err(|e| format!("Atalho esconder: {}", e))?;
+
+    gs.on_shortcut(k_clear.as_str(), |app, _shortcut, event| {
+        if event.state == ShortcutState::Pressed {
+            let state = app.state::<AppState>();
+            state.messages.lock().unwrap().clear();
+            let _ = app.emit("messages_cleared", ());
+        }
+    })
+    .map_err(|e| format!("Atalho limpar: {}", e))?;
+
+    gs.on_shortcut(k_chat.as_str(), |app, _shortcut, event| {
+        if event.state == ShortcutState::Pressed {
+            open_chat_window(app);
+        }
+    })
+    .map_err(|e| format!("Atalho chat: {}", e))?;
+
+    gs.on_shortcut(k_settings.as_str(), |app, _shortcut, event| {
+        if event.state == ShortcutState::Pressed {
+            if let Some(window) = app.get_webview_window("settings") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            } else {
+                let url = tauri::WebviewUrl::App("index.html?view=settings".into());
+                let _ = WebviewWindowBuilder::new(app, "settings", url)
+                    .title("Chronos — Configuracoes")
+                    .inner_size(720.0, 700.0)
+                    .min_inner_size(600.0, 500.0)
+                    .resizable(true)
+                    .build();
+            }
+        }
+    })
+    .map_err(|e| format!("Atalho configuracoes: {}", e))?;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -964,6 +1714,9 @@ pub fn run() {
             pipeline_cancel: Mutex::new(CancellationToken::new()),
         })
         .setup(|app| {
+            let ks = app.state::<AppState>().config.lock().unwrap().clone();
+            let k_voice = resolved_shortcut(&ks.shortcut_voice, "Shift+Z");
+
             // Build tray menu
             let show_item =
                 MenuItemBuilder::with_id("show", "Mostrar janela").build(app)?;
@@ -985,7 +1738,7 @@ pub fn run() {
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .tooltip("Chronos — segure Shift+Z para falar")
+                .tooltip(format!("Chronos — segure {} para falar", k_voice))
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {
@@ -1021,125 +1774,28 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Register global shortcut in Rust so it works when window is hidden
-            app.global_shortcut().on_shortcut("Shift+Z", |app, _shortcut, event| {
-                match event.state {
-                    ShortcutState::Pressed => {
-                        // Cancel any running pipeline first
-                        {
-                            let state = app.state::<AppState>();
-                            let mut cancel = state.pipeline_cancel.lock().unwrap();
-                            cancel.cancel(); // signal the running pipeline to stop
-                            *cancel = CancellationToken::new(); // fresh token for next pipeline
-                        }
-
-                        // Tell frontend to stop audio and reset
-                        let _ = app.emit("pipeline_interrupted", ());
-
-                        // Show window at bottom-right and start recording
-                        if let Some(window) = app.get_webview_window("main") {
-                            if let Ok(Some(monitor)) = window.current_monitor() {
-                                let screen = monitor.size();
-                                let scale = monitor.scale_factor();
-                                let win_w = 320.0;
-                                let win_h = 400.0;
-                                let padding = 20.0;
-                                let dock_offset = 60.0; // Taskbar offset for Windows
-                                let x = (screen.width as f64 / scale) - win_w - padding;
-                                let y = (screen.height as f64 / scale) - win_h - padding - dock_offset;
-                                let _ = window.set_position(tauri::PhysicalPosition::new(
-                                    (x * scale) as i32,
-                                    (y * scale) as i32,
-                                ));
-                            }
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                        let _ = app.emit("hotkey_pressed", ());
-
-                        // Start recording
-                        let state = app.state::<AppState>();
-                        let is_rec = *state.is_recording.lock().unwrap();
-                        if !is_rec {
-                            state.recorded_samples.lock().unwrap().clear();
-                            *state.is_recording.lock().unwrap() = true;
-                            let app_clone = app.clone();
-                            std::thread::spawn(move || {
-                                if let Err(e) = voice::record_audio(&app_clone) {
-                                    eprintln!("Recording error: {}", e);
-                                }
-                            });
-                        }
-                    }
-                    ShortcutState::Released => {
-                        let _ = app.emit("hotkey_released", ());
-
-                        // Log pipeline start
-                        {
-                            let state = app.state::<AppState>();
-                            let config = state.config.lock().unwrap();
-                            let tts_mode = std::env::var("DEXTER_TTS_MODE").unwrap_or_else(|_| "chatterbox".to_string());
-                            eprintln!(
-                                "[perf] pipeline_start | tts_mode={} | llm_model={}",
-                                tts_mode,
-                                config.llm_model
-                            );
-                        }
-
-                        // Stop recording and process
-                        let state = app.state::<AppState>();
-                        *state.is_recording.lock().unwrap() = false;
-
-                        // Grab the current cancel token for this pipeline
-                        let cancel_token = state.pipeline_cancel.lock().unwrap().clone();
-
-                        let app_clone = app.clone();
-                        // Small delay to let recording thread finish, then process
-                        std::thread::spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-
-                            let state = app_clone.state::<AppState>();
-                            let samples = state.recorded_samples.lock().unwrap().clone();
-                            let sample_rate = *state.recording_sample_rate.lock().unwrap();
-                            let config = state.config.lock().unwrap().clone();
-
-                            if samples.is_empty() {
-                                let _ = app_clone.emit("processing", ProcessingState {
-                                    stage: "error".to_string(),
-                                    text: "Nenhum áudio gravado".to_string(),
-                                });
-                                return;
-                            }
-
-                            tauri::async_runtime::spawn(async move {
-                                if let Err(e) = process_pipeline(app_clone.clone(), samples, sample_rate, config, cancel_token).await {
-                                    if e != "interrupted" {
-                                        eprintln!("Pipeline error: {}", e);
-                                        let _ = app_clone.emit("processing", ProcessingState {
-                                            stage: "error".to_string(),
-                                            text: e,
-                                        });
-                                    }
-                                }
-                            });
-                        });
-                    }
-                }
-            })?;
-
-            // Register Shift+X to hide/dismiss the window
-            app.global_shortcut().on_shortcut("Shift+X", |app, _shortcut, event| {
-                if event.state == ShortcutState::Pressed {
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.hide();
-                    }
-                }
-            })?;
+            register_global_hotkeys(app.handle())?;
 
             // Make webview background transparent and hide on launch
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
                 let _ = window.hide();
+
+                // Salvar historico ao fechar a janela principal
+                let app_clone = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Destroyed = event {
+                        let state = app_clone.state::<AppState>();
+                        let messages = state.messages.lock().unwrap().clone();
+                        let path = history_path();
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        if let Ok(json) = serde_json::to_string_pretty(&messages) {
+                            let _ = std::fs::write(&path, json);
+                        }
+                    }
+                });
             }
 
             Ok(())
@@ -1147,8 +1803,17 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_config,
             set_config,
+            pause_global_shortcuts,
+            resume_global_shortcuts,
+            restart_app,
+            get_default_config,
+            list_models,
+            send_chat_message,
+            export_conversation,
             get_messages,
             clear_messages,
+            save_history,
+            load_history,
             show_window,
             hide_window,
             ingest_text,
