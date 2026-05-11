@@ -1,4 +1,4 @@
-# Dexter: «Biblioteca de músicas» + «Ordem aleatória e reproduzir» no Reprodutor Multimédia (WinUI/UWP).
+# Chronos: «Biblioteca de músicas» + «Ordem aleatória e reproduzir» no Reprodutor Multimédia (WinUI/UWP).
 
 param([int]$StartupWaitMs = 0)
 

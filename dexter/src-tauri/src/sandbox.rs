@@ -328,7 +328,7 @@ fn run_guarded(
     });
 
     let output = match rx.recv_timeout(std::time::Duration::from_secs(config.timeout_secs)) {
-        Ok(result) => result.map_err(|e| format!("Failed to execute: {}", e))?,
+        Ok(result) => result.map_err(|e| format!("Falha ao executar: {}", e))?,
         Err(_) => return Err(format!("Command timed out after {}s", config.timeout_secs)),
     };
 

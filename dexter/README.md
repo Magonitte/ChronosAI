@@ -1,4 +1,4 @@
-# Dexter — Assistente de voz (desktop)
+# Chronos — Assistente de voz (desktop)
 
 Assistente de voz **local** e focado em privacidade: você segura uma tecla de atalho, fala e ouve a resposta sintetizada — com LLM, STT e TTS rodando na sua máquina (ou em serviços locais que você configurar).
 
@@ -171,6 +171,8 @@ npm run tauri build  # instalador / artefatos de release
 
 Edite variáveis no topo do script (`start-all.ps1`): caminhos para `llama-server`, `whisper-server`, modelos e pastas do Chatterbox.
 
+**Perfil recomendado:** `voice-chatterbox` (padrão do script) — Chatterbox em CUDA, contexto LLM 8192, `-ngl 28`. Otimizações de latência (Gemma 4 + Turbo TTS) estão documentadas em [**`Documentação/Cronica_Otimizacao_TTFA_Chronos_AI.md`**](Documentação/Cronica_Otimizacao_TTFA_Chronos_AI.md).
+
 ---
 
 ## Pilha tecnológica
@@ -187,7 +189,7 @@ Edite variáveis no topo do script (`start-all.ps1`): caminhos para `llama-serve
 
 ---
 
-## Estrutura de pastas (Dexter)
+## Estrutura de pastas (Chronos)
 
 ```
 dexter/

@@ -1,4 +1,5 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
+use chrono::{Datelike, Timelike, Weekday};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,15 +31,15 @@ $bitmap.Dispose()
     let status = Command::new("powershell")
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_script])
         .status()
-        .map_err(|e| format!("Failed to run screenshot: {}", e))?;
+        .map_err(|e| format!("Falha ao executar captura de tela: {}", e))?;
 
     if !status.success() {
-        return Err("Screenshot capture failed".to_string());
+        return Err("Falha ao capturar a tela.".to_string());
     }
 
     // Resize using the image crate and convert to JPEG
     let img = image::open(&tmp_raw)
-        .map_err(|e| format!("Failed to open screenshot: {}", e))?;
+        .map_err(|e| format!("Falha ao abrir a captura: {}", e))?;
 
     let (w, h) = (img.width(), img.height());
     let max_dim: u32 = 1280;
@@ -56,12 +57,12 @@ $bitmap.Dispose()
 
     resized
         .save(&tmp_jpeg)
-        .map_err(|e| format!("Failed to save JPEG: {}", e))?;
+        .map_err(|e| format!("Falha ao salvar JPEG: {}", e))?;
 
     let _ = std::fs::remove_file(&tmp_raw);
 
     let bytes = std::fs::read(&tmp_jpeg)
-        .map_err(|e| format!("Failed to read screenshot JPEG: {}", e))?;
+        .map_err(|e| format!("Falha ao ler JPEG da captura: {}", e))?;
     let _ = std::fs::remove_file(&tmp_jpeg);
 
     Ok(STANDARD.encode(&bytes))
@@ -105,22 +106,22 @@ pub async fn describe_screenshot(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Vision request failed: {}", e))?;
+        .map_err(|e| format!("Falha na requisição de visão: {}", e))?;
 
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Vision API error {}: {}", status, text));
+        return Err(format!("Erro na API de visão {}: {}", status, text));
     }
 
     let json: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| format!("Failed to parse vision response: {}", e))?;
+        .map_err(|e| format!("Falha ao interpretar resposta de visão: {}", e))?;
 
     Ok(json["choices"][0]["message"]["content"]
         .as_str()
-        .unwrap_or("Could not describe the screenshot.")
+        .unwrap_or("Não foi possível descrever a captura de tela.")
         .to_string())
 }
 
@@ -129,13 +130,13 @@ pub fn read_clipboard() -> Result<String, String> {
     let output = Command::new("powershell")
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "Get-Clipboard -Format Text"])
         .output()
-        .map_err(|e| format!("Failed to read clipboard: {}", e))?;
+        .map_err(|e| format!("Falha ao ler a área de transferência: {}", e))?;
 
     if !output.status.success() {
-        return Err("Could not read clipboard".to_string());
+        return Err("Não foi possível ler a área de transferência.".to_string());
     }
 
-    String::from_utf8(output.stdout).map_err(|e| format!("Clipboard not valid UTF-8: {}", e))
+    String::from_utf8(output.stdout).map_err(|e| format!("Área de transferência não é UTF-8 válido: {}", e))
 }
 
 fn normalize_search_tokens(s: &str) -> Vec<String> {
@@ -707,7 +708,7 @@ fn open_path_default_program(path: &Path) -> Result<(), String> {
     let status = Command::new("cmd")
         .args(["/c", "start", "", &p])
         .status()
-        .map_err(|e| format!("Failed to open file: {}", e))?;
+        .map_err(|e| format!("Falha ao abrir arquivo: {}", e))?;
     if status.success() {
         Ok(())
     } else {
@@ -790,7 +791,7 @@ pub async fn play_local_music_playlist(
         );
         if paths.is_empty() {
             return Err(format!(
-                "Nenhuma faixa local encontrada para {:?}. Pastas ou nomes de arquivo devem conter as mesmas palavras do pedido (ex.: linkin e park). Configure pastas em Configurações do Dexter ou use DEXTER_MUSIC_PATHS.",
+                "Nenhuma faixa local encontrada para {:?}. Pastas ou nomes de arquivo devem conter as mesmas palavras do pedido (ex.: linkin e park). Configure pastas em Configurações do Chronos ou use DEXTER_MUSIC_PATHS.",
                 artist_owned
             ));
         }
@@ -848,7 +849,7 @@ pub async fn play_full_local_music_library(
                 ));
             }
             msg.push_str(
-                "Em Configurações do Dexter adicione \"Pastas de música\", ou use DEXTER_MUSIC_PATHS.",
+                "Em Configurações do Chronos adicione \"Pastas de música\", ou use DEXTER_MUSIC_PATHS.",
             );
             return Err(msg);
         }
@@ -933,7 +934,7 @@ pub async fn play_music_query(
         .unwrap_or(false);
     if local_only {
         return Err(
-            "Não encontrei essa faixa nas pastas locais pesquisadas. Nas Configurações do Dexter defina \"Pastas de música\", ou DEXTER_MUSIC_PATHS, \
+            "Não encontrei essa faixa nas pastas locais pesquisadas. Nas Configurações do Chronos defina \"Pastas de música\", ou DEXTER_MUSIC_PATHS, \
              ou mova os arquivos para Música / Documentos. O assistente compara o título com nomes de pastas e de arquivos."
                 .into(),
         );
@@ -1028,19 +1029,51 @@ pub fn open_url(url: &str) -> Result<String, String> {
     let status = Command::new("cmd")
         .args(["/c", "start", "", url])
         .status()
-        .map_err(|e| format!("Failed to open URL: {}", e))?;
+        .map_err(|e| format!("Falha ao abrir URL: {}", e))?;
 
     if status.success() {
-        Ok(format!("Opened {} in the default browser.", url))
+        Ok(format!("Abri {} no navegador padrão.", url))
     } else {
-        Err("Failed to open URL".to_string())
+        Err("Falha ao abrir URL.".to_string())
     }
 }
 
-/// Get current date, time, and day of week.
+/// Data, hora e dia da semana em português do Brasil.
 pub fn get_current_time() -> String {
     let now = chrono::Local::now();
-    now.format("%A, %B %e, %Y at %I:%M %p").to_string()
+    let dia_semana = match now.weekday() {
+        Weekday::Mon => "segunda-feira",
+        Weekday::Tue => "terça-feira",
+        Weekday::Wed => "quarta-feira",
+        Weekday::Thu => "quinta-feira",
+        Weekday::Fri => "sexta-feira",
+        Weekday::Sat => "sábado",
+        Weekday::Sun => "domingo",
+    };
+    let mes = match now.month() {
+        1 => "janeiro",
+        2 => "fevereiro",
+        3 => "março",
+        4 => "abril",
+        5 => "maio",
+        6 => "junho",
+        7 => "julho",
+        8 => "agosto",
+        9 => "setembro",
+        10 => "outubro",
+        11 => "novembro",
+        _ => "dezembro",
+    };
+    format!(
+        "{}, {} de {} de {} — {:02}:{:02}:{:02}",
+        dia_semana,
+        now.day(),
+        mes,
+        now.year(),
+        now.hour(),
+        now.minute(),
+        now.second()
+    )
 }
 
 /// Fetch a URL and return its text content (HTML stripped to readable text).
@@ -1050,13 +1083,13 @@ pub async fn web_fetch(url: &str) -> Result<String, String> {
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+        .map_err(|e| format!("Erro no cliente HTTP: {}", e))?;
 
     let resp = client
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("Fetch failed: {}", e))?;
+        .map_err(|e| format!("Falha ao buscar URL: {}", e))?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -1066,7 +1099,7 @@ pub async fn web_fetch(url: &str) -> Result<String, String> {
     let html = resp
         .text()
         .await
-        .map_err(|e| format!("Failed to read body: {}", e))?;
+        .map_err(|e| format!("Falha ao ler o corpo da resposta: {}", e))?;
 
     // Strip HTML to plain text
     let text = strip_html(&html);
@@ -1074,7 +1107,7 @@ pub async fn web_fetch(url: &str) -> Result<String, String> {
     // Truncate to avoid flooding context
     let max_len = 6000;
     if text.len() > max_len {
-        Ok(format!("{}...\n(truncated, {} total chars)", &text[..max_len], text.len()))
+        Ok(format!("{}...\n(truncado, {} caracteres no total)", &text[..max_len], text.len()))
     } else {
         Ok(text)
     }
@@ -1166,13 +1199,13 @@ pub fn list_running_apps() -> Result<String, String> {
             "Get-Process | Where-Object {$_.MainWindowTitle -ne ''} | Select-Object -ExpandProperty MainWindowTitle | Sort-Object"
         ])
         .output()
-        .map_err(|e| format!("Failed to list apps: {}", e))?;
+        .map_err(|e| format!("Falha ao listar aplicativos: {}", e))?;
 
     if !output.status.success() {
-        return Err("Could not list running apps".to_string());
+        return Err("Não foi possível listar os aplicativos em execução.".to_string());
     }
 
-    String::from_utf8(output.stdout).map_err(|e| format!("Output not valid UTF-8: {}", e))
+    String::from_utf8(output.stdout).map_err(|e| format!("Saída não é UTF-8 válido: {}", e))
 }
 
 /// Executa script UI Automation para «Biblioteca de músicas» + «Ordem aleatória e reproduzir».
@@ -1306,20 +1339,20 @@ fn launch_desktop_app_windows(app: &str) -> Result<String, String> {
         }
         _ => {
             return Err(format!(
-                "Unknown app {:?}. Allowed: cursor, vscode, terminal, chrome, edge, discord, obs, snipping_tool, media_player, excel, word, powerpoint, outlook.",
+                "App desconhecido {:?}. Permitidos: cursor, vscode, terminal, chrome, edge, discord, obs, snipping_tool, media_player, excel, word, powerpoint, outlook.",
                 app
             ));
         }
     };
 
-    Ok(format!("Opened {}.", label))
+    Ok(format!("{} foi aberto.", label))
 }
 
 /// GUI apps inherit a minimal PATH from the parent process; use absolute paths and `cmd /c start`.
 #[cfg(windows)]
 fn windows_gui_spawn(path: &Path) -> Result<(), String> {
     if !path.exists() {
-        return Err(format!("Not found: {}", path.display()));
+        return Err(format!("Não encontrado: {}", path.display()));
     }
     // `start "" <path>` works for .exe, .cmd, paths with spaces; avoids broken PATH lookups.
     Command::new("cmd.exe")
@@ -1432,10 +1465,10 @@ fn spawn_simple(candidates: &[&str], desc: &str) -> Result<(), String> {
         }
     }
     Err(format!(
-        "Could not start {} (tried {:?}): {}",
+        "Não foi possível iniciar {} (tentou {:?}): {}",
         desc,
         candidates,
-        last_err.unwrap_or_else(|| "unknown error".to_string())
+        last_err.unwrap_or_else(|| "erro desconhecido".to_string())
     ))
 }
 
@@ -1697,7 +1730,7 @@ fn taskkill_any(exe_names: &[&str], friendly_label: &str, try_media_path_kill: b
 
     if !killed.is_empty() {
         return Ok(format!(
-            "Closed {} (stopped: {}).",
+            "{} fechado (encerrado: {}).",
             friendly_label,
             killed.join(", ")
         ));
@@ -1707,7 +1740,7 @@ fn taskkill_any(exe_names: &[&str], friendly_label: &str, try_media_path_kill: b
     let bases: Vec<String> = exe_names.iter().map(|e| exe_base_name(e)).collect();
     if let Ok(true) = powershell_stop_named_processes(&bases) {
         return Ok(format!(
-            "Closed {} (via Stop-Process: {}).",
+            "{} fechado (via Stop-Process: {}).",
             friendly_label,
             bases.join(", ")
         ));
@@ -1717,14 +1750,14 @@ fn taskkill_any(exe_names: &[&str], friendly_label: &str, try_media_path_kill: b
     if try_media_path_kill {
         if let Ok(true) = powershell_stop_media_by_path() {
             return Ok(format!(
-                "Closed {} (matched process path under Groove / Media Player / Store).",
+                "{} fechado (caminho do processo em Groove / Reprodutor / Store).",
                 friendly_label
             ));
         }
     }
 
     Err(format!(
-        "Could not close {} — no matching process found (tried: {}). If this is a Store app, close it manually or check Task Manager for the exact process name.",
+        "Não foi possível fechar {} — nenhum processo correspondente (tentou: {}). Se for app da Microsoft Store, feche manualmente ou confira o nome exato no Gerenciador de Tarefas.",
         friendly_label,
         exe_names.join(", ")
     ))

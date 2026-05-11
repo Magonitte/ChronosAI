@@ -1,5 +1,5 @@
 ﻿{
-    "input":  "Ola! Eu sou o Dexter, seu assistente de voz.",
+    "input":  "Ola! Eu sou o Chronos, seu assistente de voz.",
     "voice":  "dexter-ptbr",
     "model":  "chatterbox",
     "response_format":  "wav"

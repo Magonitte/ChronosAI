@@ -129,35 +129,35 @@ function ConfigTab({ config, setConfig }: { config: VoiceConfig; setConfig: (c: 
 
   return (
     <div className="flex flex-col gap-5 p-5 px-6">
-      <FieldGroup title="Speech Recognition">
-        <Field label="Whisper Model Path">
+      <FieldGroup title="Reconhecimento de fala">
+        <Field label="Caminho do modelo Whisper">
           <Input value={config.whisper_model_path} onChange={(v) => setConfig({ ...config, whisper_model_path: v })} />
         </Field>
-        <Field label="Whisper Server URL">
+        <Field label="URL do servidor Whisper">
           <Input value={config.whisper_url} onChange={(v) => setConfig({ ...config, whisper_url: v })} placeholder="http://localhost:8081" />
         </Field>
       </FieldGroup>
 
-      <FieldGroup title="Language Model (llama.cpp)">
-        <Field label="LLM Server URL">
+      <FieldGroup title="Modelo de linguagem (llama.cpp)">
+        <Field label="URL do servidor LLM">
           <Input value={config.llm_url} onChange={(v) => setConfig({ ...config, llm_url: v })} />
         </Field>
-        <Field label="Chat Model">
+        <Field label="Modelo de chat">
           <Input value={config.llm_model} onChange={(v) => setConfig({ ...config, llm_model: v })} />
         </Field>
-        <Field label="Embedding Model">
-          <Input value={config.embed_model} onChange={(v) => setConfig({ ...config, embed_model: v })} placeholder="Same as chat model (uses /embedding endpoint)" />
+        <Field label="Modelo de embedding">
+          <Input value={config.embed_model} onChange={(v) => setConfig({ ...config, embed_model: v })} placeholder="Igual ao de chat (usa o endpoint /embedding)" />
         </Field>
-        <Field label="Vision Model">
-          <Input value={config.vision_model} onChange={(v) => setConfig({ ...config, vision_model: v })} placeholder="llava (for screenshot tool)" />
+        <Field label="Modelo de visão">
+          <Input value={config.vision_model} onChange={(v) => setConfig({ ...config, vision_model: v })} placeholder="llava (ferramenta de captura de tela)" />
         </Field>
       </FieldGroup>
 
-      <FieldGroup title="Text-to-Speech">
-        <Field label="Chatterbox URL">
+      <FieldGroup title="Síntese de voz">
+        <Field label="URL do Chatterbox">
           <Input value={config.chatterbox_url} onChange={(v) => setConfig({ ...config, chatterbox_url: v })} />
         </Field>
-        <Field label="Voice">
+        <Field label="Voz">
           <Input value={config.chatterbox_voice} onChange={(v) => setConfig({ ...config, chatterbox_voice: v })} />
         </Field>
       </FieldGroup>
@@ -186,15 +186,15 @@ function ConfigTab({ config, setConfig }: { config: VoiceConfig; setConfig: (c: 
           </div>
         </Field>
         <p className="text-[12px] text-white/45 leading-relaxed -mt-2">
-          Basta indicar a <span className="text-white/70">pasta raiz</span> (ex.: Música) — o Dexter procura <span className="text-white/70">em todas as subpastas</span> (artistas, álbuns, etc.); não precisas
-          de adicionar cada pasta de artista. Podes usar <span className="text-white/70">Escolher pasta</span> ou editar a lista à mão (uma por linha, ou <span className="text-white/55">;</span> /{" "}
+          Basta indicar a <span className="text-white/70">pasta raiz</span> (ex.: Música) — o Chronos procura <span className="text-white/70">em todas as subpastas</span> (artistas, álbuns, etc.); você não precisa
+          adicionar cada pasta de artista. Você pode usar <span className="text-white/70">Escolher pasta</span> ou editar a lista manualmente (uma por linha, ou <span className="text-white/55">;</span> /{" "}
           <span className="text-white/55">|</span>). Junta-se à pasta Música do sistema.{" "}
           <span className="text-white/55 font-mono text-[11px]">DEXTER_MUSIC_PATHS</span> continua válida em paralelo.
         </p>
       </FieldGroup>
 
-      <FieldGroup title="Personality">
-        <Field label="System Prompt">
+      <FieldGroup title="Personalidade">
+        <Field label="Prompt do sistema">
           <textarea
             value={config.system_prompt}
             onChange={(e) => setConfig({ ...config, system_prompt: e.target.value })}
@@ -210,16 +210,16 @@ function ConfigTab({ config, setConfig }: { config: VoiceConfig; setConfig: (c: 
 /* ─────────────────────────── Settings: Tools Tab ─────────────────────────── */
 
 const TOOL_DEFINITIONS: { key: keyof ToolsConfig; name: string; desc: string; icon: string }[] = [
-  { key: "screenshot", name: "Screenshot", desc: "Capture and describe what's on your screen", icon: "📸" },
-  { key: "read_clipboard", name: "Read Clipboard", desc: "Read current text from your clipboard", icon: "📋" },
-  { key: "search_knowledge", name: "Knowledge Search", desc: "Search your local knowledge base for context", icon: "🔍" },
-  { key: "open_url", name: "Open URL", desc: "Open websites in your default browser", icon: "🌐" },
-  { key: "get_current_time", name: "Current Time", desc: "Get the current date, time, and day of week", icon: "🕐" },
-  { key: "list_apps", name: "Running Apps", desc: "List currently running applications", icon: "🖥" },
-  { key: "web_fetch", name: "Web Fetch", desc: "Fetch and read web pages for information", icon: "🕸" },
-  { key: "run_command", name: "Shell Command", desc: "Execute terminal commands on your PC", icon: "⚡" },
-  { key: "launch_desktop_app", name: "Launch / Close Apps", desc: "Open or close Cursor, VS Code, Terminal, browsers, Office, etc.", icon: "🚀" },
-  { key: "media_controls", name: "Media & volume", desc: "Play/pause/skip music or video (system session) and master volume", icon: "🎵" },
+  { key: "screenshot", name: "Captura de tela", desc: "Captura e descreve o que aparece na sua tela", icon: "📸" },
+  { key: "read_clipboard", name: "Ler área de transferência", desc: "Lê o texto atual da área de transferência", icon: "📋" },
+  { key: "search_knowledge", name: "Busca na base de conhecimento", desc: "Pesquisa na sua base local para dar contexto", icon: "🔍" },
+  { key: "open_url", name: "Abrir URL", desc: "Abre sites no navegador padrão", icon: "🌐" },
+  { key: "get_current_time", name: "Data e hora", desc: "Obtém data, hora e dia da semana atuais", icon: "🕐" },
+  { key: "list_apps", name: "Apps em execução", desc: "Lista aplicativos em execução no momento", icon: "🖥" },
+  { key: "web_fetch", name: "Buscar na web", desc: "Baixa e lê páginas para obter informação", icon: "🕸" },
+  { key: "run_command", name: "Comando no shell", desc: "Executa comandos de terminal no seu PC", icon: "⚡" },
+  { key: "launch_desktop_app", name: "Abrir / fechar apps", desc: "Abre ou fecha Cursor, VS Code, Terminal, navegadores, Office etc.", icon: "🚀" },
+  { key: "media_controls", name: "Mídia e volume", desc: "Play/pause/pular música ou vídeo (sessão do sistema) e volume principal", icon: "🎵" },
 ];
 
 function ToolsTab({ config, setConfig }: { config: VoiceConfig; setConfig: (c: VoiceConfig) => void }) {
@@ -236,9 +236,9 @@ function ToolsTab({ config, setConfig }: { config: VoiceConfig; setConfig: (c: V
   return (
     <div className="flex flex-col gap-5 p-5 px-6">
       <p className="text-[13px] text-white/40 leading-relaxed flex items-center gap-2">
-        Enable or disable tools the assistant can use.
+        Ative ou desative as ferramentas que o assistente pode usar.
         <span className="text-[11px] text-cyan-400/60 bg-cyan-400/[0.08] px-2 py-0.5 rounded">
-          {enabledCount}/{TOOL_DEFINITIONS.length} active
+          {enabledCount}/{TOOL_DEFINITIONS.length} ativas
         </span>
       </p>
 
@@ -266,9 +266,9 @@ function ToolsTab({ config, setConfig }: { config: VoiceConfig; setConfig: (c: V
       </div>
 
       {config.tools.run_command && (
-        <FieldGroup title="Shell Sandbox">
+        <FieldGroup title="Sandbox do shell">
           <p className="text-[12px] text-white/30 leading-relaxed -mt-1">
-            Commands are validated, environment sanitized, and all executions logged.
+            Os comandos são validados, o ambiente é sanitizado e todas as execuções ficam registradas.
           </p>
 
           <div className="flex gap-1 bg-white/[0.04] rounded-lg p-0.5">
@@ -282,21 +282,21 @@ function ToolsTab({ config, setConfig }: { config: VoiceConfig; setConfig: (c: V
                     : "bg-transparent text-white/40 hover:text-white/60"
                 }`}
               >
-                {mode}
+                {mode === "Guarded" ? "Protegido" : "Docker"}
               </button>
             ))}
           </div>
 
           <p className="text-[11px] text-white/25 leading-relaxed">
             {config.sandbox.mode === "Guarded"
-              ? "Isolated workspace, sanitized env, blocked dangerous commands."
-              : "Docker container with memory/CPU limits, read-only root. Requires Docker Desktop."}
+              ? "Workspace isolado, ambiente sanitizado e comandos perigosos bloqueados."
+              : "Contêiner Docker com limites de memória/CPU e raiz somente leitura. Exige Docker Desktop."}
           </p>
 
-          <Field label="Workspace Directory">
+          <Field label="Pasta de trabalho">
             <Input value={config.sandbox.workspace} onChange={(v) => setSandbox({ workspace: v })} />
           </Field>
-          <Field label="Timeout (seconds)">
+          <Field label="Tempo limite (segundos)">
             <input
               type="number"
               value={config.sandbox.timeout_secs}
@@ -307,10 +307,10 @@ function ToolsTab({ config, setConfig }: { config: VoiceConfig; setConfig: (c: V
 
           {config.sandbox.mode === "Docker" && (
             <>
-              <Field label="Docker Image">
+              <Field label="Imagem Docker">
                 <Input value={config.sandbox.docker_image} onChange={(v) => setSandbox({ docker_image: v })} />
               </Field>
-              <Field label="Readable Paths (mounted read-only)">
+              <Field label="Pastas legíveis (montadas como somente leitura)">
                 <textarea
                   value={config.sandbox.readable_paths.join("\n")}
                   onChange={(e) => setSandbox({ readable_paths: e.target.value.split("\n").filter(Boolean) })}
@@ -321,8 +321,8 @@ function ToolsTab({ config, setConfig }: { config: VoiceConfig; setConfig: (c: V
               </Field>
               <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-white/[0.02] border border-white/[0.04]">
                 <div className="flex-1">
-                  <div className="text-[13px] font-medium text-white/80">Allow Network</div>
-                  <div className="text-[11px] text-white/30 mt-0.5">Let commands access the internet</div>
+                  <div className="text-[13px] font-medium text-white/80">Permitir rede</div>
+                  <div className="text-[11px] text-white/30 mt-0.5">Permite que os comandos acessem a internet</div>
                 </div>
                 <Toggle on={config.sandbox.allow_network} onToggle={() => setSandbox({ allow_network: !config.sandbox.allow_network })} />
               </div>
@@ -360,12 +360,12 @@ function KnowledgeTab() {
     setStatus("");
     try {
       const chunks = await invoke<number>("ingest_text", { source: textSource, text: textContent });
-      setStatus(`Ingested ${chunks} chunks from "${textSource}"`);
+      setStatus(`${chunks} trechos indexados de "${textSource}"`);
       setTextSource("");
       setTextContent("");
       loadSources();
     } catch (e) {
-      setStatus(`Error: ${e}`);
+      setStatus(`Erro: ${e}`);
     }
     setIngesting(false);
   };
@@ -374,13 +374,13 @@ function KnowledgeTab() {
     setIngesting(true);
     setStatus("");
     try {
-      const path = prompt("Enter file path:");
+      const path = prompt("Digite o caminho do arquivo:");
       if (!path) { setIngesting(false); return; }
       const chunks = await invoke<number>("ingest_file", { path });
-      setStatus(`Ingested ${chunks} chunks`);
+      setStatus(`${chunks} trechos indexados`);
       loadSources();
     } catch (e) {
-      setStatus(`Error: ${e}`);
+      setStatus(`Erro: ${e}`);
     }
     setIngesting(false);
   };
@@ -390,26 +390,26 @@ function KnowledgeTab() {
       await invoke("delete_knowledge_source", { source });
       loadSources();
     } catch (e) {
-      setStatus(`Error: ${e}`);
+      setStatus(`Erro: ${e}`);
     }
   };
 
   return (
     <div className="flex flex-col gap-5 p-5 px-6">
       <p className="text-[13px] text-white/40 leading-relaxed">
-        Add documents for the assistant to reference during conversations.
+        Adicione documentos para o assistente consultar durante a conversa.
       </p>
 
-      <FieldGroup title="Add Text">
-        <Field label="Source Name">
-          <Input value={textSource} onChange={setTextSource} placeholder="e.g. project-notes" />
+      <FieldGroup title="Adicionar texto">
+        <Field label="Nome da fonte">
+          <Input value={textSource} onChange={setTextSource} placeholder="ex.: notas-do-projeto" />
         </Field>
-        <Field label="Content">
+        <Field label="Conteúdo">
           <textarea
             value={textContent}
             onChange={(e) => setTextContent(e.target.value)}
             rows={5}
-            placeholder="Paste text content here..."
+            placeholder="Cole o texto aqui..."
             className="w-full bg-white/[0.05] border border-white/10 text-white/90 px-3 py-2.5 rounded-lg text-[13px] font-inherit outline-none resize-y min-h-[80px] transition-all duration-200 focus:border-blue-500/50 focus:bg-white/[0.07] placeholder:text-white/20"
           />
         </Field>
@@ -419,14 +419,14 @@ function KnowledgeTab() {
             disabled={ingesting || !textSource.trim() || !textContent.trim()}
             className="px-4 py-2 rounded-lg text-[13px] font-medium border-none cursor-pointer bg-blue-500 text-white transition-all duration-150 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            {ingesting ? "Ingesting..." : "Add Text"}
+            {ingesting ? "Indexando..." : "Adicionar texto"}
           </button>
           <button
             onClick={ingestFile}
             disabled={ingesting}
             className="px-4 py-2 rounded-lg text-[13px] font-medium border-none cursor-pointer bg-white/10 text-white/80 transition-all duration-150 hover:bg-white/[0.15] disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            Add File
+            Adicionar arquivo
           </button>
         </div>
       </FieldGroup>
@@ -437,10 +437,10 @@ function KnowledgeTab() {
         </div>
       )}
 
-      <FieldGroup title={`Sources (${sources.length})`}>
+      <FieldGroup title={`Fontes (${sources.length})`}>
         {sources.length === 0 ? (
           <div className="text-[13px] text-white/25 text-center py-5">
-            No documents in knowledge base yet.
+            Ainda não há documentos na base de conhecimento.
           </div>
         ) : (
           <div className="flex flex-col gap-1">
@@ -448,12 +448,12 @@ function KnowledgeTab() {
               <div key={name} className="flex items-center justify-between px-3 py-2.5 rounded-lg bg-white/[0.03] hover:bg-white/[0.06] transition-colors duration-150">
                 <div className="flex items-center gap-2.5">
                   <span className="text-[13px] text-white/80 font-medium">{name}</span>
-                  <span className="text-[10px] text-white/25 bg-white/[0.05] px-2 py-0.5 rounded">{chunks} chunks</span>
+                  <span className="text-[10px] text-white/25 bg-white/[0.05] px-2 py-0.5 rounded">{chunks} trechos</span>
                 </div>
                 <button
                   onClick={() => deleteSource(name)}
                   className="w-7 h-7 rounded-md border-none bg-red-500/10 text-red-400/60 text-base cursor-pointer flex items-center justify-center transition-all duration-150 hover:bg-red-500/20 hover:text-red-400/90"
-                  title="Remove source"
+                  title="Remover fonte"
                 >
                   x
                 </button>
@@ -540,23 +540,23 @@ function Settings() {
   if (!config) return null;
 
   const tabs: { id: SettingsTab; label: string }[] = [
-    { id: "config", label: "Config" },
-    { id: "tools", label: "Tools" },
-    { id: "knowledge", label: "Knowledge" },
+    { id: "config", label: "Configuração" },
+    { id: "tools", label: "Ferramentas" },
+    { id: "knowledge", label: "Conhecimento" },
   ];
 
   return (
     <div className="h-screen flex flex-col settings-bg backdrop-blur-xl overflow-hidden">
       {/* Header */}
       <div className="flex items-center justify-between px-6 pt-5 pb-3.5" style={{ WebkitAppRegion: "drag" } as React.CSSProperties}>
-        <h2 className="text-base font-semibold text-white/85 tracking-tight">Settings</h2>
+        <h2 className="text-base font-semibold text-white/85 tracking-tight">Configurações</h2>
         {tab !== "knowledge" && (
           <button
             onClick={save}
             className="px-4 py-1.5 rounded-md text-[12px] font-medium border-none cursor-pointer bg-blue-500 text-white hover:bg-blue-600 transition-colors duration-150"
             style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           >
-            {saved ? "Saved!" : "Save"}
+            {saved ? "Salvo!" : "Salvar"}
           </button>
         )}
       </div>

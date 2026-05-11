@@ -29,8 +29,8 @@ class Config:
     TOP_P = float(os.getenv('TOP_P', 1.0))
     
     # S3Gen Turbo mode: fewer CFM timesteps = faster speech-token → audio conversion.
-    # Default 10 timesteps; Turbo (2) is ~5x faster with slight quality degradation.
-    CFM_TIMESTEPS = int(os.getenv('CFM_TIMESTEPS', 10))
+    # Default 2 (Turbo, validated for voice assistant); use CFM_TIMESTEPS=10 in .env for max quality.
+    CFM_TIMESTEPS = int(os.getenv('CFM_TIMESTEPS', 2))
     
     # Text processing
     MAX_CHUNK_LENGTH = int(os.getenv('MAX_CHUNK_LENGTH', 280))

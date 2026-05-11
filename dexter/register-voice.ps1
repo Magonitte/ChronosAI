@@ -163,7 +163,7 @@ Write-Host "  Testando sintese com a voz clonada..." -ForegroundColor Cyan
 
 try {
     $testBody = @{
-        input = "Ola! Eu sou o Dexter, seu assistente de voz."
+        input = "Ola! Eu sou o Chronos, seu assistente de voz."
         voice = $VoiceName
     } | ConvertTo-Json
 

@@ -221,16 +221,16 @@ async fn embed_texts(
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format!("Embedding request failed: {}", e))?;
+                .map_err(|e| format!("Falha na requisição de embedding: {}", e))?;
 
             let status = resp.status();
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
-                return Err(format!("Embedding API error {}: {}", status, body));
+                return Err(format!("Erro na API de embedding {}: {}", status, body));
             }
 
             let result: LlamaCppEmbedResponse = resp.json().await
-                .map_err(|e| format!("Failed to parse embedding response: {}", e))?;
+                .map_err(|e| format!("Falha ao interpretar resposta de embedding: {}", e))?;
             Ok::<Vec<f64>, String>(result.embedding)
         }
     }).collect();

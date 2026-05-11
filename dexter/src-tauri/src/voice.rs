@@ -15,7 +15,7 @@ pub fn record_audio(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Er
     let host = cpal::default_host();
     let device = host
         .default_input_device()
-        .ok_or("No input device available")?;
+        .ok_or("Nenhum dispositivo de entrada de áudio disponível")?;
 
     let config = device.default_input_config()?;
     let sample_rate = config.sample_rate().0;
@@ -55,7 +55,7 @@ pub fn record_audio(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Er
             )?
         }
         format => {
-            return Err(format!("Unsupported sample format: {:?}", format).into());
+            return Err(format!("Formato de amostra de áudio não suportado: {:?}", format).into());
         }
     };
 
@@ -356,13 +356,13 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
             "type": "function",
             "function": {
                 "name": "search_knowledge",
-                "description": "Search the user's local knowledge base for relevant information. Use this when the user asks about something that might be in their stored documents or notes.",
+                "description": "Pesquisa a base de conhecimento local do usuário por informações relevantes. Use quando a pergunta puder estar em documentos ou anotações armazenados.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "The search query to find relevant knowledge"
+                            "description": "Consulta de busca para encontrar conhecimento relevante"
                         }
                     },
                     "required": ["query"]
@@ -376,13 +376,13 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
             "type": "function",
             "function": {
                 "name": "take_screenshot",
-                "description": "Capture a screenshot of the user's screen and describe what is visible. Use this when the user asks what's on their screen, asks you to look at something, or wants help with something they're looking at.",
+                "description": "Captura a tela do usuário e descreve o que está visível. Use quando perguntarem o que há na tela, pedirem para olhar algo ou quiserem ajuda com o que estão vendo.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "question": {
                             "type": "string",
-                            "description": "What to look for or describe in the screenshot. Defaults to a general description."
+                            "description": "O que observar ou descrever na captura. O padrão é uma descrição geral."
                         }
                     }
                 }
@@ -395,7 +395,7 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
             "type": "function",
             "function": {
                 "name": "read_clipboard",
-                "description": "Read the current text contents of the user's clipboard. Use this when the user says they copied something, or asks about what's in their clipboard.",
+                "description": "Lê o texto atual da área de transferência do usuário. Use quando disserem que copiaram algo ou perguntarem o que há copiado.",
                 "parameters": {
                     "type": "object",
                     "properties": {}
@@ -409,13 +409,13 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
             "type": "function",
             "function": {
                 "name": "open_url",
-                "description": "Open a URL in the user's default web browser. Do NOT use YouTube or Spotify links to play a song BY NAME when play_music_query is available — that tool searches local files first. Use open_url for generic websites, docs, maps, etc.",
+                "description": "Abre uma URL no navegador padrão. NÃO use YouTube ou Spotify para tocar uma música PELO NOME quando play_music_query estiver disponível — essa ferramenta busca arquivos locais primeiro. Use open_url para sites em geral, documentos, mapas, etc.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "url": {
                             "type": "string",
-                            "description": "The URL to open"
+                            "description": "URL a abrir"
                         }
                     },
                     "required": ["url"]
@@ -429,7 +429,7 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
             "type": "function",
             "function": {
                 "name": "get_current_time",
-                "description": "Get the current date, time, and day of week. Use when the user asks what time or date it is.",
+                "description": "Obtém a data, a hora e o dia da semana atuais. Use quando perguntarem que horas são ou que dia é.",
                 "parameters": {
                     "type": "object",
                     "properties": {}
@@ -443,7 +443,7 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
             "type": "function",
             "function": {
                 "name": "list_running_apps",
-                "description": "List all currently running applications on the user's PC. Use when the user asks what apps are open or running.",
+                "description": "Lista os aplicativos em execução no PC. Use quando perguntarem quais programas estão abertos ou rodando.",
                 "parameters": {
                     "type": "object",
                     "properties": {}
@@ -457,13 +457,13 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
             "type": "function",
             "function": {
                 "name": "web_fetch",
-                "description": "Fetch a web page and return its text content. Use when the user asks about something online, wants you to read an article, check a website, look up documentation, or get current information from the web.",
+                "description": "Baixa uma página web e devolve o texto. Use para ler artigos, documentação, verificar um site ou obter informação atual da internet.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "url": {
                             "type": "string",
-                            "description": "The URL to fetch"
+                            "description": "URL a buscar"
                         }
                     },
                     "required": ["url"]
@@ -477,13 +477,13 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
             "type": "function",
             "function": {
                 "name": "run_command",
-                "description": "Execute a PowerShell command on the user's PC and return output. For opening or closing the predefined desktop apps (Cursor, VS Code, Terminal, browsers, Office, etc.), prefer launch_desktop_app or close_desktop_app. For playing a song BY NAME use play_music_query; for whole-library shuffle use native_music_library_shuffle_play (no disk scan); for artist-scoped multi-track M3U use play_local_music_playlist only when that scope applies; NEVER use play_full_local_music_library unless the user explicitly asked for a giant exported M3U file (requires explicit_m3u_export_request true). For music or video play/pause/skip/volume on what is already playing, prefer control_media_playback and adjust_system_volume instead of simulating keys via PowerShell.",
+                "description": "Executa um comando PowerShell no PC e devolve a saída. Para abrir/fechar apps pré-definidos (Cursor, VS Code, Terminal, navegadores, Office etc.), prefira launch_desktop_app ou close_desktop_app. Para música PELO NOME use play_music_query; para embaralhar a biblioteca inteira use native_music_library_shuffle_play (sem varredura de disco); para playlist M3U por artista use play_local_music_playlist só quando fizer sentido; NUNCA use play_full_local_music_library salvo se o usuário pediu explicitamente um M3U gigante exportado (exige explicit_m3u_export_request true). Para play/pause/pular/volume do que já está tocando, prefira control_media_playback e adjust_system_volume em vez de simular teclas pelo PowerShell.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command": {
                             "type": "string",
-                            "description": "The shell command to execute (runs in PowerShell)"
+                            "description": "Comando shell a executar (PowerShell)"
                         }
                     },
                     "required": ["command"]
@@ -497,7 +497,7 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
             "type": "function",
             "function": {
                 "name": "launch_desktop_app",
-                "description": "Open a predefined desktop application on Windows. Prefer this over run_command when the user asks to open Cursor, VS Code, Windows Terminal, Chrome, Edge, Discord, OBS, Snipping Tool, Groove/media player, Excel, Word, PowerPoint, or Outlook. To close those apps, use close_desktop_app.",
+                "description": "Abre um aplicativo de desktop pré-definido no Windows. Prefira isso a run_command quando pedirem para abrir Cursor, VS Code, Terminal do Windows, Chrome, Edge, Discord, OBS, Ferramenta de Captura, Groove/reprodutor de mídia, Excel, Word, PowerPoint ou Outlook. Para fechar, use close_desktop_app.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -519,7 +519,7 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
                                 "powerpoint",
                                 "outlook"
                             ],
-                            "description": "Application id: cursor; vscode (VS Code); terminal (Windows Terminal); chrome; edge; discord; obs (OBS Studio); snipping_tool (capture tool); media_player or groove (Groove Music); excel; word; powerpoint; outlook."
+                            "description": "Id do aplicativo: cursor; vscode (VS Code); terminal (Terminal do Windows); chrome; edge; discord; obs (OBS Studio); snipping_tool (captura); media_player ou groove (Groove Music); excel; word; powerpoint; outlook."
                         }
                     },
                     "required": ["app"]
@@ -530,7 +530,7 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
             "type": "function",
             "function": {
                 "name": "close_desktop_app",
-                "description": "Close (quit) a predefined desktop application on Windows by stopping its main process. Same app ids as launch_desktop_app. Prefer this over run_command when the user asks to close or kill those apps.",
+                "description": "Fecha (encerra) um aplicativo pré-definido no Windows parando o processo principal. Mesmos ids que launch_desktop_app. Prefira isto a run_command quando pedirem para fechar ou encerrar esses apps.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -552,7 +552,7 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
                                 "powerpoint",
                                 "outlook"
                             ],
-                            "description": "Same ids as launch_desktop_app."
+                            "description": "Mesmos ids que launch_desktop_app."
                         }
                     },
                     "required": ["app"]
@@ -566,14 +566,14 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
             "type": "function",
             "function": {
                 "name": "control_media_playback",
-                "description": "Control whatever Windows considers the active media session (Groove Music is preferred when multiple sessions exist). CANNOT play a song BY TITLE alone — for named tracks use play_music_query first. For ALL tracks by an artist as an M3U use play_local_music_playlist (not whole-PC library). For shuffle-all / entire library use native_music_library_shuffle_play only (fast, uses Media Player UI). play_full_local_music_library only if user explicitly wants a scanned giant M3U export (explicit_m3u_export_request true). flow: (1) Specific song → play_music_query. (2) Artist-scoped playlist file → play_local_music_playlist. (3) Whole library → native_music_library_shuffle_play. (4) Explicit M3U export → play_full_local_music_library. (5) Otherwise launch_desktop_app groove/media_player or open_url THEN control_media_playback play or toggle. status shows title and artist when available.",
+                "description": "Controla a sessão de mídia ativa no Windows (prioriza Groove Music se houver várias). NÃO toca uma música só PELO TÍTULO — para faixa nomeada use play_music_query primeiro. Para TODAS as faixas de um artista em M3U use play_local_music_playlist (não a biblioteca inteira do PC). Para embaralhar/toda a biblioteca use só native_music_library_shuffle_play (rápido, UI do Reprodutor). play_full_local_music_library só se o usuário pedir export M3U gigante por varredura (explicit_m3u_export_request true). Fluxo: (1) Música específica → play_music_query. (2) Playlist por artista → play_local_music_playlist. (3) Biblioteca inteira → native_music_library_shuffle_play. (4) Export M3U explícito → play_full_local_music_library. (5) Senão launch_desktop_app groove/media_player ou open_url e depois control_media_playback play ou toggle. status mostra título e artista quando disponível.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
                             "enum": ["play", "pause", "toggle", "next", "previous", "stop", "status"],
-                            "description": "play: resume or start if the app supports it (often needs YouTube or Spotify already open); pause; toggle; next/previous; stop; status: now playing"
+                            "description": "play: retoma ou inicia se o app permitir (costuma precisar de YouTube ou Spotify abertos); pause; toggle; next/previous; stop; status: tocando agora"
                         }
                     },
                     "required": ["action"]
@@ -584,18 +584,18 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
             "type": "function",
             "function": {
                 "name": "adjust_system_volume",
-                "description": "Adjust Windows master volume using multimedia keys. Use when the user asks to raise, lower, or mute/unmute system volume (not in-app volume sliders). Each step is one volume-key press (~2% per step on typical setups).",
+                "description": "Ajusta o volume principal do Windows com teclas multimídia. Use quando pedirem para aumentar, diminuir ou silenciar o volume do sistema (não controles dentro do app). Cada passo é uma pressionamento de tecla (~2% por passo em setups típicos).",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
                             "enum": ["up", "down", "mute_toggle"],
-                            "description": "up: volume up; down: volume down; mute_toggle: mute/unmute"
+                            "description": "up: volume mais alto; down: volume mais baixo; mute_toggle: alternar mudo"
                         },
                         "steps": {
                             "type": "integer",
-                            "description": "For up/down only: how many key presses (default 3, max 50)"
+                            "description": "Só para up/down: quantas vezes pressionar a tecla (padrão 3, máx. 50)"
                         }
                     },
                     "required": ["action"]
@@ -606,17 +606,17 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
             "type": "function",
             "function": {
                 "name": "play_music_query",
-                "description": "Play a song by title (optional artist). ALWAYS use this when the user names a track — never open_url to YouTube for that. Step 1: full scan of the Windows Music library folder ([Environment]::MyMusic / pasta Música do perfil, OneDrive Music, Public Music), paths from Dexter Settings (Pastas de música), DEXTER_MUSIC_PATHS env, up to 200k entries per root, matching folder + file names. Step 2: scan Downloads/Documents/Desktop with a smaller limit. Step 3: YouTube only if still no match.",
+                "description": "Toca uma música pelo título (artista opcional). Use SEMPRE que o usuário disser o nome da faixa — nunca open_url no YouTube para isso. Passo 1: varredura da pasta Música do Windows ([Environment]::MyMusic, pasta Música do perfil, OneDrive Music, Public Music), caminhos das Configurações do Chronos (Pastas de música), variável DEXTER_MUSIC_PATHS, até 200k entradas por raiz, casando pastas e nomes de arquivo. Passo 2: Downloads/Documentos/Desktop com limite menor. Passo 3: YouTube só se não achar local.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Song title (required), e.g. After Insanity"
+                            "description": "Título da música (obrigatório), ex.: After Insanity"
                         },
                         "artist": {
                             "type": "string",
-                            "description": "Optional artist or band to narrow results"
+                            "description": "Artista ou banda opcional para refinar o resultado"
                         }
                     },
                     "required": ["query"]
@@ -627,13 +627,13 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
             "type": "function",
             "function": {
                 "name": "play_local_music_playlist",
-                "description": "Writes an M3U and opens it — use ONLY when the user clearly wants multiple local tracks scoped by artist/folder keywords (e.g. «playlist do Metallica», «todas as músicas do Linkin Park»). Same matching rules as play_music_query (words in paths/filenames). NEVER use for «whole PC library», «all my music», shuffle-everything — those MUST use native_music_library_shuffle_play (player built-in «Ordem aleatoria e reproduzir»). Whole-library phrases passed here are auto-redirected to native shuffle. Not for streaming.",
+                "description": "Grava um M3U e abre — use SÓ quando quiserem várias faixas locais por artista/pasta (ex.: «playlist do Metallica», «todas as músicas do Linkin Park»). Mesmas regras de play_music_query (palavras em caminhos/nomes). NUNCA para «biblioteca inteira do PC», «todas as minhas músicas», embaralhar tudo — isso DEVE ser native_music_library_shuffle_play (botão «Ordem aleatoria e reproduzir» no player). Frases de biblioteca inteira aqui são redirecionadas ao shuffle nativo. Não é para streaming.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "artist": {
                             "type": "string",
-                            "description": "Artist or band name as in your folders/filenames, e.g. Linkin Park"
+                            "description": "Nome do artista ou banda como nas pastas/arquivos, ex.: Linkin Park"
                         }
                     },
                     "required": ["artist"]
@@ -644,17 +644,17 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
             "type": "function",
             "function": {
                 "name": "play_full_local_music_library",
-                "description": "DISABLED unless explicit export: SLOW — full disk scan building a giant M3U. Call ONLY when the user verbatim asked to create/export a large playlist file, M3U from disk scan, or list every audio path (e.g. for VLC with a file). For normal playback or shuffle of their whole library you MUST use native_music_library_shuffle_play instead (no scan). You must pass explicit_m3u_export_request true or the tool refuses. Track cap: DEXTER_MUSIC_FULL_PLAYLIST_MAX.",
+                "description": "DESATIVADO salvo exportação explícita: LENTO — varredura completa do disco gerando M3U gigante. Chame SÓ se o usuário pediu literalmente criar/exportar playlist grande, M3U por varredura ou listar todos os caminhos de áudio (ex.: VLC). Para ouvir ou embaralhar a biblioteca inteira use native_music_library_shuffle_play (sem varredura). É obrigatório explicit_m3u_export_request true ou a ferramenta recusa. Limite de faixas: DEXTER_MUSIC_FULL_PLAYLIST_MAX.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "explicit_m3u_export_request": {
                             "type": "boolean",
-                            "description": "Must be true. Set true ONLY when the user explicitly requested exporting/creating a giant M3U via disk scan — never for ordinary «play all my music»."
+                            "description": "Deve ser true. Só true quando o usuário pediu explicitamente exportar/criar M3U gigante por varredura — nunca para um «toca tudo» comum."
                         },
                         "include_downloads_documents": {
                             "type": "boolean",
-                            "description": "If true or omitted, after scanning main Music folders also scan Downloads, Videos, Documents, Desktop, and OneDrive Documents for audio. If false, only Music library + DEXTER_MUSIC_PATHS."
+                            "description": "Se true ou omitido, após as pastas principais de Música também varre Downloads, Vídeos, Documentos, Área de trabalho e OneDrive Documentos. Se false, só biblioteca de Música + DEXTER_MUSIC_PATHS."
                         }
                     },
                     "required": ["explicit_m3u_export_request"]
@@ -665,7 +665,7 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
             "type": "function",
             "function": {
                 "name": "native_music_library_shuffle_play",
-                "description": "FAST — preferred for whole-library playback: opens Windows Media Player / Groove (no disk scan, no M3U), then UI Automation clicks Music Library and the shuffle-all button whose visible label is «Ordem aleatoria e reproduzir» (Portuguese UI; often without accent on aleatoria). Uses the player's indexed library. If automation fails, user taps once. NOT for one song (play_music_query), NOT artist-scoped M3U (play_local_music_playlist), NOT giant scanned export — that requires play_full_local_music_library with explicit_m3u_export_request true.",
+                "description": "RÁPIDO — preferido para tocar a biblioteca inteira: abre o Reprodutor Multimédia / Groove (sem varredura de disco, sem M3U), depois automação de UI clica em Biblioteca de músicas e no botão de embaralhar tudo com rótulo visível «Ordem aleatoria e reproduzir» (UI em português; às vezes sem acento em aleatoria). Usa a biblioteca indexada do player. Se a automação falhar, o usuário toca uma vez. NÃO é para uma música só (play_music_query), NÃO é M3U por artista (play_local_music_playlist), NÃO é export gigante — isso exige play_full_local_music_library com explicit_m3u_export_request true.",
                 "parameters": {
                     "type": "object",
                     "properties": {}
@@ -767,7 +767,7 @@ pub async fn chat_streaming(
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("LLM API error {}: {}", status, body).into());
+        return Err(format!("Erro na API do LLM {}: {}", status, body).into());
     }
 
     let mut byte_stream = resp.bytes_stream();
@@ -1249,7 +1249,7 @@ $synth.Dispose()
             let output = child.wait_with_output()?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(format!("Windows TTS failed: {}", stderr).into());
+                return Err(format!("Falha no TTS do Windows: {}", stderr).into());
             }
 
             let bytes = std::fs::read(&output_path)?;

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Voice Assistant",
+  "productName": "Chronos",
   "version": "0.1.0",
   "identifier": "com.codacus.voice-assistant",
   "build": {
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Voice Assistant",
+        "title": "Chronos",
         "width": 380,
         "height": 420,
         "resizable": false,

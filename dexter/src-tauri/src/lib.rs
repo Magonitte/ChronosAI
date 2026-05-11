@@ -224,12 +224,12 @@ async fn ingest_text(
         .rag_store
         .ingest(&source, &text, &config.llm_url, &config.embed_model)
         .await
-        .map_err(|e| format!("Ingest failed: {}", e))
+        .map_err(|e| format!("Falha ao indexar: {}", e))
 }
 
 #[tauri::command]
 async fn ingest_file(app: tauri::AppHandle, path: String) -> Result<usize, String> {
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("Read failed: {}", e))?;
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("Falha ao ler arquivo: {}", e))?;
     let source = std::path::Path::new(&path)
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
@@ -240,7 +240,7 @@ async fn ingest_file(app: tauri::AppHandle, path: String) -> Result<usize, Strin
         .rag_store
         .ingest(&source, &text, &config.llm_url, &config.embed_model)
         .await
-        .map_err(|e| format!("Ingest failed: {}", e))
+        .map_err(|e| format!("Falha ao indexar: {}", e))
 }
 
 #[tauri::command]
@@ -249,7 +249,7 @@ fn list_knowledge_sources(app: tauri::AppHandle) -> Result<Vec<(String, usize)>,
     state
         .rag_store
         .list_sources()
-        .map_err(|e| format!("List failed: {}", e))
+        .map_err(|e| format!("Falha ao listar: {}", e))
 }
 
 #[tauri::command]
@@ -258,7 +258,7 @@ fn delete_knowledge_source(app: tauri::AppHandle, source: String) -> Result<usiz
     state
         .rag_store
         .delete_source(&source)
-        .map_err(|e| format!("Delete failed: {}", e))
+        .map_err(|e| format!("Falha ao excluir: {}", e))
 }
 
 #[tauri::command]
@@ -304,7 +304,7 @@ fn stop_recording_and_process(app: tauri::AppHandle) -> Result<(), String> {
     let config = state.config.lock().unwrap().clone();
 
     if samples.is_empty() {
-        return Err("No audio recorded".to_string());
+        return Err("Nenhum áudio gravado".to_string());
     }
 
     // Process in background
@@ -342,7 +342,7 @@ async fn process_pipeline(
         "processing",
         ProcessingState {
             stage: "transcribing".to_string(),
-            text: "Transcribing...".to_string(),
+            text: "Transcrevendo...".to_string(),
         },
     )
     .map_err(|e: tauri::Error| e.to_string())?;
@@ -352,7 +352,7 @@ async fn process_pipeline(
     let audio_len_s = samples.len() as f32 / sample_rate as f32;
     let audio_bytes_approx = samples.len() * 2; // 16-bit mono
     let transcript = voice::transcribe_audio(&whisper_url, &samples, sample_rate).await
-        .map_err(|e| format!("Transcription failed: {}", e))?;
+        .map_err(|e| format!("Falha na transcrição: {}", e))?;
     let stt_duration = stt_started.elapsed().as_secs_f32();
     eprintln!(
         "[perf] stt_done | duration_s={:.2} | audio_len_s={:.2} | rt_factor={:.2} | audio_bytes={}",
@@ -373,7 +373,7 @@ async fn process_pipeline(
             },
         )
         .map_err(|e: tauri::Error| e.to_string())?;
-        return Err("No speech detected".to_string());
+        return Err("Nenhuma fala detectada".to_string());
     }
 
     app.emit(
@@ -400,7 +400,7 @@ async fn process_pipeline(
         "processing",
         ProcessingState {
             stage: "thinking".to_string(),
-            text: "Thinking...".to_string(),
+            text: "Pensando...".to_string(),
         },
     )
     .map_err(|e: tauri::Error| e.to_string())?;
@@ -437,7 +437,7 @@ async fn process_pipeline(
                 let result = tokio::select! {
                     _ = cancel_llm.cancelled() => { return Err("interrupted".to_string()); }
                     r = voice::chat_streaming(&config, &all_msgs, &tools, &sentence_tx, _round) => {
-                        r.map_err(|e| format!("LLM failed: {}", e))?
+                        r.map_err(|e| format!("Falha no LLM: {}", e))?
                     }
                 };
 
@@ -475,13 +475,13 @@ async fn process_pipeline(
 
                                 let result_text = execute_tool(&app, &config, tool_call).await;
                                 tool_results.push_str(&format!(
-                                    "[Tool result for {}]: {}\n",
+                                    "[Resultado da ferramenta {}]: {}\n",
                                     tool_call.name, result_text
                                 ));
                             }
 
                             let follow_up = format!(
-                                "Tool results for this reply:\n\n{}",
+                                "Resultados das ferramentas para esta resposta:\n\n{}",
                                 tool_results.trim()
                             );
                             let um = ChatMessage {
@@ -534,7 +534,7 @@ async fn process_pipeline(
                             "processing",
                             ProcessingState {
                                 stage: "thinking".to_string(),
-                                text: "Thinking...".to_string(),
+                                text: "Pensando...".to_string(),
                             },
                         );
                     }
@@ -546,11 +546,11 @@ async fn process_pipeline(
 
             let result = voice::chat_streaming(&config, &all_msgs, &[], &sentence_tx, max_tool_rounds)
                 .await
-                .map_err(|e| format!("LLM failed: {}", e))?;
+                        .map_err(|e| format!("Falha no LLM: {}", e))?;
 
             match result {
                 voice::StreamResult::Content(text) => Ok(text),
-                voice::StreamResult::ToolCalls(_, _, _) => Err("Model returned tool calls after max rounds".to_string()),
+                voice::StreamResult::ToolCalls(_, _, _) => Err("O modelo solicitou ferramentas após o número máximo de rodadas".to_string()),
             }
         })
     };
@@ -622,7 +622,7 @@ async fn process_pipeline(
 
     let full_response = llm_handle
         .await
-        .map_err(|e| format!("LLM task failed: {}", e))?
+        .map_err(|e| format!("Falha na tarefa do LLM: {}", e))?
         .map_err(|e| e)?;
     eprintln!("[perf] LLM stream finished in {:.2}s", llm_started.elapsed().as_secs_f32());
 
@@ -684,10 +684,10 @@ async fn execute_tool(
                 .unwrap_or_default();
 
             if results.is_empty() {
-                "No relevant results found in the knowledge base.".to_string()
+                "Nenhum resultado relevante na base de conhecimento.".to_string()
             } else {
                 results.iter().enumerate()
-                    .map(|(i, r)| format!("[{}] (source: {}, relevance: {:.2})\n{}", i + 1, r.source, r.score, r.text))
+                    .map(|(i, r)| format!("[{}] (fonte: {}, relevância: {:.2})\n{}", i + 1, r.source, r.score, r.text))
                     .collect::<Vec<_>>()
                     .join("\n\n")
             }
@@ -695,14 +695,14 @@ async fn execute_tool(
         "take_screenshot" => {
             let question = tool_call.arguments.get("question")
                 .and_then(|v| v.as_str())
-                .unwrap_or("Describe what you see on this screen in detail.")
+                .unwrap_or("Descreva em detalhe o que você vê nesta tela.")
                 .to_string();
             let monitor = tool_call.arguments.get("monitor")
                 .and_then(|v| v.as_u64()).map(|n| n as u32);
 
             let _ = app.emit("processing", ProcessingState {
                 stage: "thinking".to_string(),
-                text: "Looking at your screen...".to_string(),
+                text: "Olhando sua tela...".to_string(),
             });
 
             match tools::take_screenshot(monitor) {
@@ -714,42 +714,42 @@ async fn execute_tool(
                     };
                     match tools::describe_screenshot(&config.llm_url, vision_model, &image_b64, &question).await {
                         Ok(desc) => desc,
-                        Err(e) => format!("Screenshot captured but vision model failed: {}. Make sure the model supports image inputs (multimodal).", e),
+                        Err(e) => format!("Captura feita, mas o modelo de visão falhou: {}. Confirme se o modelo aceita imagens (multimodal).", e),
                     }
                 }
-                Err(e) => format!("Failed to capture screenshot: {}", e),
+                Err(e) => format!("Falha ao capturar a tela: {}", e),
             }
         }
         "read_clipboard" => match tools::read_clipboard() {
-            Ok(text) => if text.trim().is_empty() { "The clipboard is empty.".to_string() } else { format!("Clipboard contents:\n{}", text) },
-            Err(e) => format!("Failed to read clipboard: {}", e),
+            Ok(text) => if text.trim().is_empty() { "A área de transferência está vazia.".to_string() } else { format!("Conteúdo da área de transferência:\n{}", text) },
+            Err(e) => format!("Falha ao ler a área de transferência: {}", e),
         },
         "open_url" => {
             let url = tool_call.arguments.get("url")
                 .and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if url.is_empty() { "No URL provided.".to_string() }
-            else { match tools::open_url(&url) { Ok(msg) => msg, Err(e) => format!("Failed to open URL: {}", e) } }
+            if url.is_empty() { "Nenhuma URL informada.".to_string() }
+            else { match tools::open_url(&url) { Ok(msg) => msg, Err(e) => format!("Falha ao abrir URL: {}", e) } }
         }
         "get_current_time" => tools::get_current_time(),
         "list_running_apps" => match tools::list_running_apps() {
-            Ok(apps) => format!("Currently running applications:\n{}", apps),
-            Err(e) => format!("Failed to list apps: {}", e),
+            Ok(apps) => format!("Aplicativos em execução no momento:\n{}", apps),
+            Err(e) => format!("Falha ao listar aplicativos: {}", e),
         },
         "web_fetch" => {
             let url = tool_call.arguments.get("url")
                 .and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if url.is_empty() { "No URL provided.".to_string() }
-            else { match tools::web_fetch(&url).await { Ok(text) => text, Err(e) => format!("Failed to fetch {}: {}", url, e) } }
+            if url.is_empty() { "Nenhuma URL informada.".to_string() }
+            else { match tools::web_fetch(&url).await { Ok(text) => text, Err(e) => format!("Falha ao buscar {}: {}", url, e) } }
         }
         "run_command" => {
             let command = tool_call.arguments.get("command")
                 .and_then(|v| v.as_str()).unwrap_or("").to_string();
             if command.is_empty() {
-                "No command provided.".to_string()
+                "Nenhum comando informado.".to_string()
             } else {
                 let _ = app.emit("processing", ProcessingState {
                     stage: "thinking".to_string(),
-                    text: format!("Running: {}", command),
+                    text: format!("Executando: {}", command),
                 });
                 let audit = &app.state::<AppState>().audit_log;
                 match sandbox::execute(&command, &config.sandbox, audit) {
@@ -762,15 +762,15 @@ async fn execute_tool(
             let app_id = tool_call.arguments.get("app")
                 .and_then(|v| v.as_str()).unwrap_or("").trim();
             if app_id.is_empty() {
-                "No app id provided. Use app names like cursor, vscode, terminal, chrome, edge, discord, obs, snipping_tool, media_player, groove, excel, word, powerpoint, outlook.".to_string()
+                "Informe o id do app. Use: cursor, vscode, terminal, chrome, edge, discord, obs, snipping_tool, media_player, groove, excel, word, powerpoint, outlook.".to_string()
             } else {
                 let _ = app.emit("processing", ProcessingState {
                     stage: "thinking".to_string(),
-                    text: format!("Opening {}", app_id),
+                    text: format!("Abrindo {}", app_id),
                 });
                 match tools::launch_desktop_app(app_id) {
                     Ok(msg) => msg,
-                    Err(e) => format!("Failed to launch app: {}", e),
+                    Err(e) => format!("Falha ao abrir o aplicativo: {}", e),
                 }
             }
         }
@@ -778,15 +778,15 @@ async fn execute_tool(
             let app_id = tool_call.arguments.get("app")
                 .and_then(|v| v.as_str()).unwrap_or("").trim();
             if app_id.is_empty() {
-                "No app id provided. Same ids as launch_desktop_app.".to_string()
+                "Informe o id do app (os mesmos de launch_desktop_app).".to_string()
             } else {
                 let _ = app.emit("processing", ProcessingState {
                     stage: "thinking".to_string(),
-                    text: format!("Closing {}", app_id),
+                    text: format!("Fechando {}", app_id),
                 });
                 match tools::close_desktop_app(app_id) {
                     Ok(msg) => msg,
-                    Err(e) => format!("Failed to close app: {}", e),
+                    Err(e) => format!("Falha ao fechar o aplicativo: {}", e),
                 }
             }
         }
@@ -943,7 +943,7 @@ async fn execute_tool(
                 Err(e) => format!("Reprodutor multimédia: {}", e),
             }
         }
-        unknown => format!("Unknown tool: {}", unknown),
+        unknown => format!("Ferramenta desconhecida: {}", unknown),
     }
 }
 
@@ -966,12 +966,12 @@ pub fn run() {
         .setup(|app| {
             // Build tray menu
             let show_item =
-                MenuItemBuilder::with_id("show", "Show Window").build(app)?;
+                MenuItemBuilder::with_id("show", "Mostrar janela").build(app)?;
             let settings_item =
-                MenuItemBuilder::with_id("settings", "Settings").build(app)?;
+                MenuItemBuilder::with_id("settings", "Configurações").build(app)?;
             let clear_item =
-                MenuItemBuilder::with_id("clear", "Clear Chat").build(app)?;
-            let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+                MenuItemBuilder::with_id("clear", "Limpar conversa").build(app)?;
+            let quit_item = MenuItemBuilder::with_id("quit", "Sair").build(app)?;
 
             let menu = MenuBuilder::new(app)
                 .item(&show_item)
@@ -985,7 +985,7 @@ pub fn run() {
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .tooltip("Voice Assistant — Hold Shift+Z to talk")
+                .tooltip("Chronos — segure Shift+Z para falar")
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {
@@ -1002,7 +1002,7 @@ pub fn run() {
                             // Create a new settings window
                             let url = tauri::WebviewUrl::App("index.html?view=settings".into());
                             let _ = WebviewWindowBuilder::new(app, "settings", url)
-                                .title("Voice Assistant — Settings")
+                                .title("Chronos — Configurações")
                                 .inner_size(720.0, 700.0)
                                 .min_inner_size(600.0, 500.0)
                                 .resizable(true)
@@ -1106,7 +1106,7 @@ pub fn run() {
                             if samples.is_empty() {
                                 let _ = app_clone.emit("processing", ProcessingState {
                                     stage: "error".to_string(),
-                                    text: "No audio recorded".to_string(),
+                                    text: "Nenhum áudio gravado".to_string(),
                                 });
                                 return;
                             }

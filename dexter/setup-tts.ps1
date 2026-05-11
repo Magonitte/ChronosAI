@@ -91,7 +91,7 @@ if (-not (Test-Path $TTS_DIR)) {
 Write-Host "`n[3/5] Configurando .env..." -ForegroundColor Cyan
 
 $envContent = @"
-# Chatterbox TTS API — Configuracao para Dexter Voice Assistant
+# Chatterbox TTS API — Configuracao para Chronos Voice Assistant
 # Gerado por setup-tts.ps1
 
 # Servidor
@@ -114,7 +114,7 @@ VOICE_LIBRARY_DIR=./voices
 # Formato de audio padrao (WAV para menor latencia)
 DEFAULT_RESPONSE_FORMAT=wav
 
-# Desabilitar frontend (nao precisamos, o Dexter tem o proprio UI)
+# Desabilitar frontend (nao precisamos, o Chronos tem o proprio UI)
 ENABLE_FRONTEND=false
 
 # Logs
