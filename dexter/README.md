@@ -91,11 +91,11 @@ Fluxo típico: o modelo decide chamar `take_screenshot` com uma pergunta (“o q
 
 ## RAG (base de conhecimento)
 
-1. **Ingestão** — texto dividido em chunks; cada chunk recebe embedding via API do servidor de embeddings (mesmo host que o LLM, conforme config).
+1. **Ingestão** — texto dividido em chunks; cada chunk recebe embedding via API **`/embedding`** (servidor compatível com llama.cpp).
 2. **Busca** — a consulta é embedada e comparada por similaridade de cosseno no SQLite.
 3. **UI** — em **Configurações → Conhecimento**: adicionar texto/arquivo, listar fontes, apagar.
 
-É necessário ter um modelo de embedding disponível no servidor que você usa (equivalente ao que antes era `ollama pull nomic-embed-text` em setups Ollama).
+Em **Configurações**, a **URL de embeddings** é opcional: se estiver vazia, o RAG usa a mesma base que a **URL do LLM**. Para um modelo dedicado (por exemplo **BGE-M3** num segundo `llama-server`, ex. `http://localhost:8082`, como no `start-all.ps1`), preencha a URL e o nome do modelo de embedding exposto por esse servidor. O script **`download-bge-m3.ps1`** ajuda a obter o GGUF público (ajuste o destino no arquivo).
 
 ---
 
@@ -121,8 +121,9 @@ A bandeja do sistema abre o menu; daí você abre **Configurações**.
 - **Whisper URL** — base HTTP do servidor STT (ex.: `http://localhost:8081`).
 - **Caminho do modelo Whisper** — usado onde o cliente ainda referencia modelo em disco, conforme versão.
 - **URL do LLM** — servidor compatível OpenAI (ex.: llama.cpp em `http://localhost:8080`).
+- **URL de embeddings** — opcional; se vazio, o RAG reutiliza a URL do LLM. Use um host dedicado (ex.: `http://localhost:8082`) com modelo só de embedding (BGE-M3, etc.) quando quiser separar carga ou modelos.
 - **Modelo de chat** — nome exposto pelo servidor (ex.: nome do GGUF ou alias).
-- **Modelo de embedding** — para RAG.
+- **Modelo de embedding** — nome no servidor que atende `/embedding` (pode ser BGE-M3 ou o alias do seu `llama-server`).
 - **Modelo de visão** — screenshot; se vazio, pode reutilizar o modelo principal conforme implementação.
 - **URL do Chatterbox** — TTS (ex.: `http://localhost:8005`).
 - **Voz** — identificador da voz no servidor TTS.
@@ -150,6 +151,7 @@ O ficheiro de configuração no Windows fica em:
 - Servidores em execução **antes** de usar voz de ponta a ponta:
   - **llama.cpp** `llama-server` com modelo GGUF.
   - **whisper.cpp** `whisper-server` com modelo compatível.
+  - **Servidor de embeddings** (mesmo processo ou segunda instância em outra porta) com rota `/embedding`, se usar RAG com modelo dedicado — ver **`start-all.ps1`** (porta 8082 por padrão) e **`download-bge-m3.ps1`**.
   - **Chatterbox** (ou outro servidor OpenAI-compatible `/v1/audio/speech`) — ver **`chatterbox-tts-api/README.md`** e **`start-all.ps1`**.
 
 ---
@@ -166,12 +168,13 @@ npm run tauri build  # instalador / artefatos de release
 
 ```powershell
 .\start-all.ps1
-# Perfis: padrao voice-chatterbox | voice-fast | balanced | quality
+# Perfis: voice-chatterbox (padrao) | voice-chatterbox-cpu | voice-fast | balanced | quality
+# Exemplos: -NoEmbedding  -NoWhisper  -NoTts  -WhisperTiny  -ForceRestartServices
 ```
 
-Edite variáveis no topo do script (`start-all.ps1`): caminhos para `llama-server`, `whisper-server`, modelos e pastas do Chatterbox.
+Edite variáveis no topo do script (`start-all.ps1`): caminhos para `llama-server`, `whisper-server`, modelo e porta de **embedding** (8082), modelos e pastas do Chatterbox.
 
-**Perfil recomendado:** `voice-chatterbox` (padrão do script) — Chatterbox em CUDA, contexto LLM 8192, `-ngl 28`. Otimizações de latência (Gemma 4 + Turbo TTS) estão documentadas em [**`Documentação/Cronica_Otimizacao_TTFA_Chronos_AI.md`**](Documentação/Cronica_Otimizacao_TTFA_Chronos_AI.md).
+**Perfil recomendado:** `voice-chatterbox` (padrão do script) — Chatterbox em CUDA, contexto LLM 8192, `-ngl 28` no LLM. O perfil **`voice-chatterbox-cpu`** move o Chatterbox para CPU e devolve mais camadas GPU ao modelo de chat. Métricas de latência (Gemma 4 + Turbo TTS) estão no [**README na raiz do repositório**](../README.md#performance-pipeline-de-voz). Notas mais longas podem ficar em `Documentação/` à parte — pasta **não versionada** no Git.
 
 ---
 
@@ -183,6 +186,7 @@ Edite variáveis no topo do script (`start-all.ps1`): caminhos para `llama-serve
 | Backend | Rust (reqwest, cpal, SQLite, …) |
 | Frontend | React 19, TypeScript, Vite, Tailwind |
 | STT | Servidor Whisper (HTTP) |
+| Embeddings (RAG) | `llama-server` ou compatível com `/embedding` (pode ser instância dedicada) |
 | LLM | Servidor compatível OpenAI (llama.cpp, etc.) |
 | TTS | Chatterbox ou modo configurado |
 | Atalhos globais | plugin global-shortcut |
@@ -207,6 +211,8 @@ dexter/
 │   ├── capabilities/
 │   └── tauri.conf.json
 ├── start-all.ps1
+├── validate.ps1
+├── download-bge-m3.ps1
 └── package.json
 ```
 

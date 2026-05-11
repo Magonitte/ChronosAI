@@ -44,10 +44,13 @@ Visão técnica do app está em [**`dexter/README.md`**](dexter/README.md).
 - Serviços locais típicos (ajuste portas nos **Configurações** do app):
   - LLM: **llama.cpp** `llama-server` (ex.: `http://localhost:8080`)
   - STT: **whisper.cpp** `whisper-server` (ex.: `http://localhost:8081`)
+  - Embeddings (RAG): servidor com rota **`/embedding`** (ex.: segundo `llama-server` em `http://localhost:8082` com modelo **BGE-M3** GGUF) — opcional se o mesmo host do LLM já expuser embeddings compatíveis
   - TTS: **Chatterbox** (ou modo configurado no `start-all.ps1`) — ver também `dexter/chatterbox-tts-api/`
 - **Node.js**, **Rust**, **Visual Studio Build Tools** (Windows) para compilar o Tauri.
 
-O script **`dexter/start-all.ps1`** ajuda a subir LLM + Whisper + TTS + frontend (perfil **padrão: `voice-chatterbox`**; outros: `voice-fast`, `balanced`, `quality`). Caminhos de executáveis e modelos **precisam ser ajustados** no topo do script para a sua máquina.
+O script **`dexter/start-all.ps1`** orquestra LLM, Whisper, servidor de embeddings (porta 8082 por padrão), TTS, Vite e o Tauri quando aplicável. Perfil **padrão: `voice-chatterbox`**; outros: `voice-fast`, `balanced`, `quality`, **`voice-chatterbox-cpu`** (Chatterbox em CPU para liberar VRAM ao LLM). Parâmetros úteis: `-NoWhisper`, `-NoTts`, `-NoEmbedding`, `-WhisperTiny`, `-ForceRestartServices`. Caminhos de executáveis e modelos **precisam ser ajustados** no topo do script.
+
+Para testar se as portas e o `config.json` batem com os serviços: **`dexter/validate.ps1`**. Para obter o GGUF **BGE-M3** (embeddings): **`dexter/download-bge-m3.ps1`** (ajuste pasta de destino no script).
 
 ---
 
@@ -68,7 +71,7 @@ A otimização completa incluiu:
 - **`CFM_TIMESTEPS=2`** — Chatterbox Turbo, ~5x mais rápido na conversão speech token → áudio
 - **Contexto LLM reduzido** de 16384 para 8192 — token rate 3.2x maior sem perda perceptível de coerência
 
-Perfil recomendado: **`voice-chatterbox`** (Chatterbox GPU + Turbo). Consulte [`dexter/Documentação/`](dexter/Documentação/) para relatórios detalhados.
+Perfil recomendado: **`voice-chatterbox`** (Chatterbox GPU + Turbo). Notas ou relatórios mais longos podem ficar guardados localmente em `dexter/Documentação/` — essa pasta **não** é enviada para o Git; a tabela acima resume o ganho principal no repositório.
 
 ---
 
@@ -102,6 +105,8 @@ ChronosAI/
 │   ├── src/                  ← React (Vite)
 │   ├── src-tauri/            ← Rust (core, voz, ferramentas, RAG)
 │   ├── start-all.ps1         ← orquestra servidores locais (Windows)
+│   ├── validate.ps1          ← verifica LLM / STT / embedding / TTS / config
+│   ├── download-bge-m3.ps1   ← opcional: transfere GGUF BGE-M3 para RAG
 │   └── chatterbox-tts-api/   ← API TTS (quando usada no projeto)
 └── tools/
     └── whisper.cpp/          ← upstream whisper.cpp (referência / build)
