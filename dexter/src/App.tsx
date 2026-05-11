@@ -1166,6 +1166,11 @@ function Orb() {
       console.log(
         `[perf] frontend_playback_started_${next.index} | play_delay_ms=${playDelay.toFixed(1)} | duration_s=${audio.duration?.toFixed(2) ?? "N/A"}`
       );
+      if (next.index === 0) {
+        console.log(
+          `[perf] TTFS | chunk_0_playback_started | timestamp_ms=${performance.now().toFixed(0)}`
+        );
+      }
     }).catch(() => {});
     audio.onended = () => {
       lastChunkEndRef.current = performance.now();

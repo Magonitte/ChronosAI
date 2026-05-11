@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
@@ -7,6 +7,7 @@ use tauri::{
     Emitter, Manager,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 mod media_controls;
@@ -987,11 +988,10 @@ async fn process_pipeline(
 
     // Single streaming loop: stream with tools → if model returns tool calls,
     // execute them and stream again. If it returns content, sentences flow to TTS.
-    let (sentence_tx, mut sentence_rx) = tokio::sync::mpsc::channel::<String>(16);
+    let (sentence_tx, mut sentence_rx) = tokio::sync::mpsc::channel::<String>(6);
     let mut sentence_index: u32 = 0;
     let mut full_text = String::new();
     let llm_started = std::time::Instant::now();
-    let mut first_audio_logged = false;
 
     let app_clone = app.clone();
     let config_clone = config.clone();
@@ -1128,6 +1128,9 @@ async fn process_pipeline(
     drop(sentence_tx);
 
     // Process sentences as they arrive from the stream → TTS → audio
+    // Use a semaphore to serialise GPU access (Chatterbox + LLM share 8 GB VRAM).
+    let tts_semaphore = Arc::new(Semaphore::new(1));
+
     while let Some(sentence) = sentence_rx.recv().await {
         if cancel.is_cancelled() { break; }
 
@@ -1149,39 +1152,51 @@ async fn process_pipeline(
         )
         .map_err(|e: tauri::Error| e.to_string())?;
 
-        // Race TTS synthesis against cancellation
-        let tts_started = std::time::Instant::now();
-        let tts_result = tokio::select! {
+        let current_index = sentence_index;
+        sentence_index += 1;
+
+        let app = app.clone();
+        let config = config.clone();
+        let cancel = cancel.clone();
+        let sem = tts_semaphore.clone();
+
+        // Acquire the single TTS slot before spawning — this keeps back‑pressure
+        // while still allowing sentence_rx to drain.
+        let permit = tokio::select! {
             _ = cancel.cancelled() => { break; }
-            r = voice::synthesize(&config, &sentence, sentence_index) => r
+            p = sem.acquire_owned() => p.unwrap()
         };
 
-        match tts_result {
-            Ok(audio_base64) => {
-                eprintln!(
-                    "[perf] TTS chunk {} finished in {:.2}s",
-                    sentence_index,
-                    tts_started.elapsed().as_secs_f32()
-                );
-                if !first_audio_logged {
+        tokio::spawn(async move {
+            let _permit = permit; // held until synthesis completes
+
+            if cancel.is_cancelled() { return; }
+
+            let tts_started = std::time::Instant::now();
+            let tts_result = tokio::select! {
+                _ = cancel.cancelled() => { return; }
+                r = voice::synthesize(&config, &sentence, current_index) => r
+            };
+
+            match tts_result {
+                Ok(audio_base64) => {
                     eprintln!(
-                        "[perf] First audio ready in {:.2}s",
-                        pipeline_started.elapsed().as_secs_f32()
+                        "[perf] TTS chunk {} finished in {:.2}s",
+                        current_index,
+                        tts_started.elapsed().as_secs_f32()
                     );
-                    first_audio_logged = true;
+                    // Note: first_audio event is logged by the frontend (TTFS).
+                    if cancel.is_cancelled() { return; }
+                    app.emit("play_audio_chunk", AudioChunk {
+                        index: current_index,
+                        audio: audio_base64,
+                    }).ok();
                 }
-                if cancel.is_cancelled() { break; }
-                app.emit("play_audio_chunk", AudioChunk {
-                    index: sentence_index,
-                    audio: audio_base64,
-                })
-                .map_err(|e: tauri::Error| e.to_string())?;
-                sentence_index += 1;
+                Err(e) => {
+                    eprintln!("TTS failed for chunk {}: {}", current_index, e);
+                }
             }
-            Err(e) => {
-                eprintln!("TTS failed for sentence: {}", e);
-            }
-        }
+        });
     }
 
     if cancel.is_cancelled() {

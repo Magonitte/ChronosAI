@@ -1531,10 +1531,18 @@ fn parse_xml_tool_calls(content: &str) -> Option<Vec<ToolCall>> {
     if calls.is_empty() { None } else { Some(calls) }
 }
 
+/// True when `chars[i]` sits between two ASCII digits (e.g. "1,5" or "10,000").
+fn is_number_context(chars: &[(usize, char)], i: usize) -> bool {
+    i > 0
+        && i + 1 < chars.len()
+        && chars[i - 1].1.is_ascii_digit()
+        && chars[i + 1].1.is_ascii_digit()
+}
+
 /// Find a good TTS chunk boundary in the buffer.
 /// Returns the byte index of the last char of the chunk (inclusive).
 fn find_tts_chunk_end(text: &str) -> Option<usize> {
-    const MIN_SOFT_CHUNK_CHARS: usize = 60;
+    const MIN_SOFT_CHUNK_CHARS: usize = 20;
     const MAX_CHUNK_CHARS: usize = 140;
 
     let chars: Vec<(usize, char)> = text.char_indices().collect();
@@ -1542,6 +1550,22 @@ fn find_tts_chunk_end(text: &str) -> Option<usize> {
         return None;
     }
 
+    // Voice-first: split at comma/semicolon/colon as soon as there's a
+    // meaningful word before it (≥6 chars).  Avoids splitting "1,5", "10,000".
+    for i in 0..chars.len() {
+        let (_byte_idx, ch) = chars[i];
+        if (ch == ',' || ch == ';' || ch == ':') && i >= 6 {
+            let next_idx = i + 1;
+            if next_idx < chars.len() {
+                let (_, next_ch) = chars[next_idx];
+                if next_ch.is_whitespace() && !is_number_context(&chars, i) {
+                    return Some(chars[next_idx].0);
+                }
+            }
+        }
+    }
+
+    // Sentence-ending punctuation — always split immediately.
     for i in 0..chars.len() {
         let (_byte_idx, ch) = chars[i];
         if ch == '.' || ch == '!' || ch == '?' {
@@ -1555,11 +1579,13 @@ fn find_tts_chunk_end(text: &str) -> Option<usize> {
         }
     }
 
+    // Don't force-split tiny buffers (wait for more content).
     if chars.len() < MAX_CHUNK_CHARS {
         return None;
     }
 
     let soft_limit = chars.len().min(MAX_CHUNK_CHARS);
+    // Fallback comma/semicolon/colon between MIN_SOFT_CHUNK_CHARS..soft_limit.
     for i in (MIN_SOFT_CHUNK_CHARS..soft_limit).rev() {
         let (_byte_idx, ch) = chars[i];
         if ch == ',' || ch == ';' || ch == ':' {
@@ -1573,6 +1599,7 @@ fn find_tts_chunk_end(text: &str) -> Option<usize> {
         }
     }
 
+    // Last resort: split at whitespace.
     for i in (MIN_SOFT_CHUNK_CHARS..soft_limit).rev() {
         let (byte_idx, ch) = chars[i];
         if ch.is_whitespace() {
