@@ -44,3 +44,6 @@ Desktop.ini
 
 # Local agent caches
 .claude/persist/
+
+# Local LLM server launcher (paths/machine-specific)
+Server_Gemma4_v2.bat
