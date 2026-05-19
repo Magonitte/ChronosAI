@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, type CSSProperties } from "react";
+import { useCallback, useEffect, useLayoutEffect, useState, useRef, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -8,6 +8,14 @@ import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import "./App.css";
+
+/** Start next WAV chunk this many seconds before the current clip ends (reduces silent gap vs strict onended). */
+const CHUNK_PLAYBACK_PREROLL_SEC = 0.1;
+
+/** Same text as console — also printed by the Rust host so start-all / cargo logs capture it. */
+function echoPerfToHost(line: string) {
+  void invoke("log_frontend_perf", { line }).catch(() => {});
+}
 
 interface ProcessingState {
   stage: string;
@@ -40,8 +48,13 @@ interface VoiceConfig {
   whisper_model_path: string;
   whisper_url: string;
   llm_url: string;
+  llm_url_voice?: string;
+  llm_url_text?: string;
   embed_url: string;
+  vision_url: string;
   llm_model: string;
+  llm_model_voice?: string;
+  llm_model_text?: string;
   embed_model: string;
   vision_model: string;
   chatterbox_url: string;
@@ -161,6 +174,8 @@ const TOOL_LABEL_MAP: Record<string, string> = {
   list_running_apps: "Listando apps",
   run_command: "Executando comando",
   web_fetch: "Buscando página web",
+  fetch_weather: "Consultando clima",
+  fetch_fx_quote: "Consultando cotação",
   launch_desktop_app: "Abrindo aplicativo",
   close_desktop_app: "Fechando aplicativo",
   control_media_playback: "Controlando reprodução",
@@ -432,8 +447,20 @@ function ConfigTab({
         <Field label="URL do servidor LLM">
           <Input value={config.llm_url} onChange={(v) => setConfig({ ...config, llm_url: v })} />
         </Field>
-        <Field label="Modelo de chat">
+        <Field label="Modelo de chat (fallback)">
           <ModelSelect value={config.llm_model} onChange={(v) => setConfig({ ...config, llm_model: v })} llmUrl={config.llm_url} placeholder="Selecione o modelo de chat..." />
+        </Field>
+        <Field label="URL LLM voz (opcional, ex. http://127.0.0.1:8080)">
+          <Input value={config.llm_url_voice ?? ""} onChange={(v) => setConfig({ ...config, llm_url_voice: v })} placeholder="Vazio = usa URL acima" />
+        </Field>
+        <Field label="Modelo de voz (opcional)">
+          <ModelSelect value={config.llm_model_voice ?? ""} onChange={(v) => setConfig({ ...config, llm_model_voice: v })} llmUrl={config.llm_url_voice || config.llm_url} placeholder="Llama 8B — vazio = modelo acima" />
+        </Field>
+        <Field label="URL LLM chat texto (opcional, ex. http://127.0.0.1:8084)">
+          <Input value={config.llm_url_text ?? ""} onChange={(v) => setConfig({ ...config, llm_url_text: v })} placeholder="Qwen 35B com -WithTextLlm" />
+        </Field>
+        <Field label="Modelo de chat texto (opcional)">
+          <ModelSelect value={config.llm_model_text ?? ""} onChange={(v) => setConfig({ ...config, llm_model_text: v })} llmUrl={config.llm_url_text || config.llm_url} placeholder="Vazio = modelo de chat acima" />
         </Field>
       </FieldGroup>
 
@@ -465,7 +492,7 @@ function ConfigTab({
           </div>
         </Field>
 
-        <Field label="Estilo de resposta">
+        <Field label="Estilo de resposta (chat texto)">
           <select
             value={config.response_style}
             onChange={(e) => setConfig({ ...config, response_style: e.target.value })}
@@ -475,6 +502,9 @@ function ConfigTab({
             <option value="normal">Normal — equilibrado</option>
             <option value="detailed">Detalhado — explicações completas</option>
           </select>
+          <p className="text-[11px] text-white/30 leading-relaxed mt-1.5">
+            O modo voz (Shift+Z) usa sempre respostas curtas (~2–3 frases), independentemente desta opção.
+          </p>
         </Field>
       </FieldGroup>
 
@@ -490,12 +520,15 @@ function ConfigTab({
         </p>
       </FieldGroup>
 
-      <FieldGroup title="Visão (screenshots)">
+      <FieldGroup title="Visão (screenshots e webcam)">
+        <Field label="URL do servidor de visão">
+          <Input value={config.vision_url} onChange={(v) => setConfig({ ...config, vision_url: v })} placeholder="http://localhost:8083 (usa LLM se vazio)" />
+        </Field>
         <Field label="Modelo de visão">
-          <ModelSelect value={config.vision_model} onChange={(v) => setConfig({ ...config, vision_model: v })} llmUrl={config.llm_url} placeholder="(usar modelo de chat)" />
+          <ModelSelect value={config.vision_model} onChange={(v) => setConfig({ ...config, vision_model: v })} llmUrl={config.vision_url || config.llm_url} placeholder="qwen2.5-vl-3b-instruct (recomendado)" />
         </Field>
         <p className="text-[11px] text-white/30 leading-relaxed -mt-1">
-          Deixe em branco para usar o mesmo modelo de chat. Só funciona se o modelo tiver suporte multimodal (mmproj).
+          Recomendado: Qwen2.5-VL 3B (~2 GB em Q4_K_M). Servidor dedicado na porta 8083. Suporta screenshots e webcam.
         </p>
       </FieldGroup>
 
@@ -1079,6 +1112,25 @@ function Settings() {
   );
 }
 
+async function resolveTextModelLabel(config?: VoiceConfig): Promise<string> {
+  const c = config ?? (await invoke<VoiceConfig>("get_config"));
+  const fromConfig = c.llm_model_text?.trim();
+  if (fromConfig) return fromConfig;
+  const textUrl = c.llm_url_text?.trim() || "http://127.0.0.1:8084";
+  try {
+    const models = await invoke<string[]>("list_models", { llmUrl: textUrl });
+    if (models.length > 0) return models[0];
+  } catch {
+    /* servidor ainda a subir */
+  }
+  return "Modelo de texto (Qwen)";
+}
+
+function resolveVoiceModelLabel(config: VoiceConfig): string {
+  const voice = config.llm_model_voice?.trim();
+  return voice || config.llm_model;
+}
+
 /* ─────────────────────────── Orb View ─────────────────────────── */
 
 function Orb() {
@@ -1092,13 +1144,63 @@ function Orb() {
   const playedCountRef = useRef(0);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const lastChunkEndRef = useRef<number>(0); // perf: track inter-sentence gap
+  /** Next chunk index required for strict playback order (parallel TTS may finish out of order). */
+  const nextRequiredIndexRef = useRef(0);
+  /** Gaps (ms) between consecutive chunk playbacks for one assistant utterance — used for A/B logs. */
+  const gapSessionMsRef = useRef<number[]>([]);
+  /** Index currently playing (-1 = none). Used to prefetch N+1. */
+  const currentlyPlayingIndexRef = useRef(-1);
+  /** Pre-created Audio for the next index (same blob URL as queue); reduces startup gap. */
+  const preloadPackRef = useRef<{ index: number; url: string; el: HTMLAudioElement } | null>(null);
+  const playNextRef = useRef<() => void>(() => {});
 
   const [currentModel, setCurrentModel] = useState("");
   const [chatPending, setChatPending] = useState(false);
+  const [voiceSwapLoading, setVoiceSwapLoading] = useState(false);
+  const [voiceStackReady, setVoiceStackReady] = useState(true);
+  const [llmModeLabel, setLlmModeLabel] = useState("");
+
+  const refreshVoiceModel = useCallback(() => {
+    invoke<VoiceConfig>("get_config")
+      .then((c) => setCurrentModel(resolveVoiceModelLabel(c)))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
-    invoke<VoiceConfig>("get_config").then(c => setCurrentModel(c.llm_model));
-  }, []);
+    refreshVoiceModel();
+  }, [refreshVoiceModel]);
+
+  useEffect(() => {
+    const unlisteners: Array<() => void | Promise<void>> = [];
+
+    listen("llm_swap_started", () => {
+      setVoiceSwapLoading(true);
+      setVoiceStackReady(false);
+    }).then((fn) => unlisteners.push(fn));
+
+    listen("llm_swap_done", () => {
+      setVoiceSwapLoading(false);
+      setVoiceStackReady(true);
+      refreshVoiceModel();
+    }).then((fn) => unlisteners.push(fn));
+
+    listen("llm_swap_failed", () => {
+      setVoiceSwapLoading(false);
+      setVoiceStackReady(false);
+    }).then((fn) => unlisteners.push(fn));
+
+    listen<string>("llm_mode_changed", (e) => {
+      setLlmModeLabel(e.payload);
+      if (e.payload.includes("Modo voz")) {
+        setVoiceStackReady(true);
+        setVoiceSwapLoading(false);
+      }
+    }).then((fn) => unlisteners.push(fn));
+
+    return () => {
+      for (const u of unlisteners) void u();
+    };
+  }, [refreshVoiceModel]);
 
   useEffect(() => {
     const start = listen("chat_processing_started", () => setChatPending(true));
@@ -1120,14 +1222,22 @@ function Orb() {
   };
 
   const stopAllAudio = () => {
-    // Stop currently playing audio
+    if (preloadPackRef.current) {
+      try {
+        preloadPackRef.current.el.pause();
+        preloadPackRef.current.el.removeAttribute("src");
+        preloadPackRef.current.el.load();
+      } catch {
+        /* ignore */
+      }
+      preloadPackRef.current = null;
+    }
     if (currentAudioRef.current) {
       currentAudioRef.current.pause();
       currentAudioRef.current.onended = null;
       currentAudioRef.current.onerror = null;
       currentAudioRef.current = null;
     }
-    // Revoke all queued audio URLs
     for (const item of audioQueueRef.current) {
       URL.revokeObjectURL(item.url);
     }
@@ -1136,58 +1246,171 @@ function Orb() {
     totalChunksRef.current = null;
     playedCountRef.current = 0;
     lastChunkEndRef.current = 0;
+    nextRequiredIndexRef.current = 0;
+    gapSessionMsRef.current = [];
+    currentlyPlayingIndexRef.current = -1;
   };
 
-  const playNext = () => {
-    if (isPlayingRef.current) return;
-    audioQueueRef.current.sort((a, b) => a.index - b.index);
-    if (audioQueueRef.current.length === 0) {
-      if (totalChunksRef.current !== null && playedCountRef.current >= totalChunksRef.current) {
-        setStage("idle");
-        totalChunksRef.current = null;
-        playedCountRef.current = 0;
-        lastChunkEndRef.current = 0;
-      }
-      return;
-    }
-    const next = audioQueueRef.current.shift()!;
-    // Log inter-sentence gap
-    if (lastChunkEndRef.current > 0) {
-      console.log(
-        `[perf] frontend_gap_${next.index} | gap_ms=${(performance.now() - lastChunkEndRef.current).toFixed(1)}`
-      );
-    }
-    isPlayingRef.current = true;
-    const audio = new Audio(next.url);
-    currentAudioRef.current = audio;
-    const playStart = performance.now();
-    audio.play().then(() => {
-      const playDelay = performance.now() - playStart;
-      console.log(
-        `[perf] frontend_playback_started_${next.index} | play_delay_ms=${playDelay.toFixed(1)} | duration_s=${audio.duration?.toFixed(2) ?? "N/A"}`
-      );
-      if (next.index === 0) {
-        console.log(
-          `[perf] TTFS | chunk_0_playback_started | timestamp_ms=${performance.now().toFixed(0)}`
-        );
-      }
-    }).catch(() => {});
-    audio.onended = () => {
-      lastChunkEndRef.current = performance.now();
-      URL.revokeObjectURL(next.url);
-      currentAudioRef.current = null;
-      isPlayingRef.current = false;
-      playedCountRef.current++;
-      playNext();
-    };
-    audio.onerror = () => {
-      URL.revokeObjectURL(next.url);
-      currentAudioRef.current = null;
-      isPlayingRef.current = false;
-      playedCountRef.current++;
-      playNext();
-    };
+  const logGapSessionSummary = () => {
+    const gaps = gapSessionMsRef.current;
+    if (gaps.length === 0) return;
+    const sum = gaps.reduce((a, b) => a + b, 0);
+    const avg = sum / gaps.length;
+    const max = Math.max(...gaps);
+    const line = `[perf] frontend_gap_session | n=${gaps.length} | avg_ms=${avg.toFixed(1)} | max_ms=${max.toFixed(1)}`;
+    console.log(line);
+    echoPerfToHost(line);
+    gapSessionMsRef.current = [];
   };
+
+  useLayoutEffect(() => {
+    playNextRef.current = () => {
+      if (isPlayingRef.current) return;
+      audioQueueRef.current.sort((a, b) => a.index - b.index);
+      if (audioQueueRef.current.length === 0) {
+        if (totalChunksRef.current !== null && playedCountRef.current >= totalChunksRef.current) {
+          logGapSessionSummary();
+          setStage("idle");
+          totalChunksRef.current = null;
+          playedCountRef.current = 0;
+          lastChunkEndRef.current = 0;
+          nextRequiredIndexRef.current = 0;
+          currentlyPlayingIndexRef.current = -1;
+        }
+        return;
+      }
+      const need = nextRequiredIndexRef.current;
+      const pos = audioQueueRef.current.findIndex((x) => x.index === need);
+      if (pos === -1) {
+        return;
+      }
+
+      let next: { index: number; url: string };
+      let audio: HTMLAudioElement;
+
+      if (preloadPackRef.current?.index === need) {
+        const qpos = audioQueueRef.current.findIndex((x) => x.index === need);
+        if (qpos !== -1) {
+          audioQueueRef.current.splice(qpos, 1);
+        }
+        const pack = preloadPackRef.current;
+        preloadPackRef.current = null;
+        next = { index: pack.index, url: pack.url };
+        audio = pack.el;
+      } else {
+        next = audioQueueRef.current.splice(pos, 1)[0];
+        audio = new Audio(next.url);
+      }
+
+      if (lastChunkEndRef.current > 0) {
+        const gapMs = performance.now() - lastChunkEndRef.current;
+        const gapLine = `[perf] frontend_gap_${next.index} | gap_ms=${gapMs.toFixed(1)}`;
+        console.log(gapLine);
+        echoPerfToHost(gapLine);
+        gapSessionMsRef.current.push(gapMs);
+      }
+
+      isPlayingRef.current = true;
+      currentlyPlayingIndexRef.current = next.index;
+      currentAudioRef.current = audio;
+
+      const onTimeUpdate = () => {
+        const el = currentAudioRef.current;
+        if (!el || el !== audio) return;
+        const d = el.duration;
+        if (!Number.isFinite(d) || d <= 0) return;
+        if (d - el.currentTime > CHUNK_PLAYBACK_PREROLL_SEC) return;
+        const nx = next.index + 1;
+        const hasNext =
+          audioQueueRef.current.some((x) => x.index === nx) || preloadPackRef.current?.index === nx;
+        if (!hasNext) return;
+        el.removeEventListener("timeupdate", onTimeUpdate);
+        el.pause();
+        el.onended = null;
+        el.onerror = null;
+        URL.revokeObjectURL(next.url);
+        currentAudioRef.current = null;
+        isPlayingRef.current = false;
+        playedCountRef.current++;
+        nextRequiredIndexRef.current = nx;
+        currentlyPlayingIndexRef.current = -1;
+        lastChunkEndRef.current = performance.now();
+        playNextRef.current();
+      };
+
+      let timeUpdateAttached = false;
+      const ensureTimeUpdate = () => {
+        if (timeUpdateAttached) return;
+        timeUpdateAttached = true;
+        audio.addEventListener("timeupdate", onTimeUpdate);
+      };
+
+      audio.addEventListener("loadedmetadata", ensureTimeUpdate, { once: true });
+      audio.addEventListener("playing", ensureTimeUpdate, { once: true });
+
+      const playStart = performance.now();
+      audio
+        .play()
+        .then(() => {
+          const playDelay = performance.now() - playStart;
+          const playLine = `[perf] frontend_playback_started_${next.index} | play_delay_ms=${playDelay.toFixed(1)} | duration_s=${audio.duration?.toFixed(2) ?? "N/A"}`;
+          console.log(playLine);
+          echoPerfToHost(playLine);
+          if (next.index === 0) {
+            const ttfsLine = `[perf] TTFS | chunk_0_playback_started | timestamp_ms=${performance.now().toFixed(0)}`;
+            console.log(ttfsLine);
+            echoPerfToHost(ttfsLine);
+          }
+          const want = next.index + 1;
+          if (preloadPackRef.current && preloadPackRef.current.index !== want) {
+            try {
+              preloadPackRef.current.el.pause();
+              preloadPackRef.current.el.removeAttribute("src");
+              preloadPackRef.current.el.load();
+            } catch {
+              /* ignore */
+            }
+            preloadPackRef.current = null;
+          }
+          if (!preloadPackRef.current) {
+            const item = audioQueueRef.current.find((x) => x.index === want);
+            if (item) {
+              const el = new Audio(item.url);
+              el.preload = "auto";
+              void el.load();
+              preloadPackRef.current = { index: want, url: item.url, el };
+            }
+          }
+        })
+        .catch(() => {});
+
+      audio.onended = () => {
+        audio.removeEventListener("timeupdate", onTimeUpdate);
+        lastChunkEndRef.current = performance.now();
+        URL.revokeObjectURL(next.url);
+        currentAudioRef.current = null;
+        isPlayingRef.current = false;
+        playedCountRef.current++;
+        nextRequiredIndexRef.current = next.index + 1;
+        currentlyPlayingIndexRef.current = -1;
+        playNextRef.current();
+      };
+      audio.onerror = () => {
+        audio.removeEventListener("timeupdate", onTimeUpdate);
+        URL.revokeObjectURL(next.url);
+        currentAudioRef.current = null;
+        isPlayingRef.current = false;
+        playedCountRef.current++;
+        nextRequiredIndexRef.current = next.index + 1;
+        currentlyPlayingIndexRef.current = -1;
+        playNextRef.current();
+      };
+    };
+  });
+
+  const playNext = useCallback(() => {
+    playNextRef.current();
+  }, []);
 
   useEffect(() => {
     const unInterrupted = listen("pipeline_interrupted", () => {
@@ -1239,6 +1462,10 @@ function Orb() {
   useEffect(() => {
     const unlisten = listen<AudioChunk>("play_audio_chunk", (event) => {
       const { index, audio } = event.payload;
+      if (index === 0) {
+        nextRequiredIndexRef.current = 0;
+        gapSessionMsRef.current = [];
+      }
       const decodeLabel = `[perf] frontend_decode_${index}`;
       console.time(decodeLabel);
       const audioBytes = Uint8Array.from(atob(audio), (c) => c.charCodeAt(0));
@@ -1246,15 +1473,35 @@ function Orb() {
       const url = URL.createObjectURL(audioBlob);
       console.timeEnd(decodeLabel);
       audioQueueRef.current.push({ index, url });
+      const playingIdx = currentlyPlayingIndexRef.current;
+      if (isPlayingRef.current && playingIdx >= 0 && index === playingIdx + 1) {
+        if (!preloadPackRef.current || preloadPackRef.current.index !== index) {
+          if (preloadPackRef.current) {
+            try {
+              preloadPackRef.current.el.pause();
+              preloadPackRef.current.el.removeAttribute("src");
+              preloadPackRef.current.el.load();
+            } catch {
+              /* ignore */
+            }
+            preloadPackRef.current = null;
+          }
+          const el = new Audio(url);
+          el.preload = "auto";
+          void el.load();
+          preloadPackRef.current = { index, url, el };
+        }
+      }
       playNext();
     });
     return () => { unlisten.then((fn) => fn()); };
-  }, []);
+  }, [playNext]);
 
   useEffect(() => {
     const unlisten = listen<number>("play_audio_done", (event) => {
       totalChunksRef.current = event.payload;
       if (playedCountRef.current >= event.payload && !isPlayingRef.current) {
+        logGapSessionSummary();
         setStage("idle");
       }
     });
@@ -1297,6 +1544,20 @@ function Orb() {
 
   return (
     <div className="flex flex-col h-screen orb-bg px-5 py-4">
+      {voiceSwapLoading && (
+        <div className="llm-swap-banner shrink-0 rounded-lg mb-2 mx-0" role="status" aria-live="polite">
+          <span className="llm-swap-spinner" aria-hidden="true" />
+          {llmModeLabel || "Restaurando modo voz (Llama + XTTS)..."}
+        </div>
+      )}
+      {!voiceSwapLoading && voiceStackReady && !llmModeLabel.includes("chat") && (
+        <div
+          className="shrink-0 mb-2 px-3 py-1.5 rounded-lg text-center text-[11px] font-medium bg-emerald-500/10 text-emerald-300/90 border border-emerald-500/20"
+          role="status"
+        >
+          Modo voz pronto — segure Shift+Z para falar
+        </div>
+      )}
       {/* Conversation bubbles */}
       <div className="flex-1 overflow-y-auto flex flex-col justify-end px-3.5 pt-4 pb-2.5 gap-2 no-scrollbar bubble-mask">
         {bubbles.map((b) => (
@@ -1348,6 +1609,8 @@ function ChatView() {
   const [statusConfig, setStatusConfig] = useState<VoiceConfig | null>(null);
   const [showAutocomplete, setShowAutocomplete] = useState(false);
   const [autocompleteIndex, setAutocompleteIndex] = useState(0);
+  const [llmSwapLoading, setLlmSwapLoading] = useState(false);
+  const [llmModeLabel, setLlmModeLabel] = useState<string>("");
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   const SLASH_COMMANDS_LIST = [
@@ -1384,8 +1647,8 @@ function ChatView() {
           .catch(() => {});
       });
 
-    invoke<VoiceConfig>("get_config")
-      .then((config) => setModelName(config.llm_model))
+    void resolveTextModelLabel()
+      .then(setModelName)
       .catch(() => {});
   }, []);
 
@@ -1446,6 +1709,35 @@ function ChatView() {
       setMessages([]);
       setStreaming("");
       setIsLoading(false);
+    }).then((fn) => {
+      if (cancelled) void fn();
+      else unlisteners.push(fn);
+    });
+
+    void ww.listen("llm_swap_started", () => {
+      setLlmSwapLoading(true);
+    }).then((fn) => {
+      if (cancelled) void fn();
+      else unlisteners.push(fn);
+    });
+
+    void ww.listen("llm_swap_done", () => {
+      setLlmSwapLoading(false);
+      void resolveTextModelLabel().then(setModelName).catch(() => {});
+    }).then((fn) => {
+      if (cancelled) void fn();
+      else unlisteners.push(fn);
+    });
+
+    void ww.listen("llm_swap_failed", () => {
+      setLlmSwapLoading(false);
+    }).then((fn) => {
+      if (cancelled) void fn();
+      else unlisteners.push(fn);
+    });
+
+    void ww.listen<string>("llm_mode_changed", (e) => {
+      setLlmModeLabel(e.payload);
     }).then((fn) => {
       if (cancelled) void fn();
       else unlisteners.push(fn);
@@ -1680,7 +1972,7 @@ function ChatView() {
              statusConfig.personality === "custom" ? "Personalizado" : "Padrão"}
           </span>
           <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/[0.06] text-white/50 font-medium whitespace-nowrap">
-            {statusConfig.llm_model}
+            {modelName || statusConfig.llm_model_text?.trim() || "Texto"}
           </span>
           <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/12 text-amber-300/85 font-medium whitespace-nowrap">
             t={statusConfig.temperature.toFixed(1)}
@@ -1691,6 +1983,12 @@ function ChatView() {
         </div>
       )}
 
+      {llmSwapLoading && (
+        <div className="llm-swap-banner" role="status" aria-live="polite">
+          <span className="llm-swap-spinner" aria-hidden="true" />
+          {llmModeLabel || "Carregando modelo..."}
+        </div>
+      )}
       <div className="chat-scroll custom-scrollbar">
         <div className="chat-thread">
         {messages.length === 0 && !streaming && (
@@ -1707,7 +2005,7 @@ function ChatView() {
 
         {messages.map((msg, index) => (
           <ChatBubbleView
-            key={msg.created_at_ms ?? `msg-${index}`}
+            key={`${msg.created_at_ms ?? 0}-${index}-${msg.role}`}
             role={msg.role}
             content={msg.content}
             createdAtMs={msg.created_at_ms}
@@ -1760,6 +2058,8 @@ function ChatView() {
         )}
         <div className="chat-composer">
           <textarea
+            id="chat-message-input"
+            name="message"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -1793,11 +2093,33 @@ function ChatView() {
                 void sendMessage();
               }
             }}
-            placeholder="Digite sua mensagem... (Enter envia, Shift+Enter quebra linha)"
-            disabled={isLoading}
+            placeholder={llmSwapLoading
+              ? (llmModeLabel || "Carregando modelo...")
+              : "Digite sua mensagem... (Enter envia, Shift+Enter quebra linha)"}
+            disabled={isLoading || llmSwapLoading}
             rows={1}
             className="chat-input"
           />
+          <button
+            onClick={async () => {
+              if (!statusConfig) return;
+              const updated = { ...statusConfig, enable_thinking: !statusConfig.enable_thinking };
+              await invoke("set_config", { config: updated });
+              setStatusConfig(updated);
+            }}
+            className={`chat-thinking-toggle${statusConfig?.enable_thinking ? " chat-thinking-toggle--on" : ""}`}
+            title={statusConfig?.enable_thinking
+              ? "Thinking sempre ativo — clique para voltar ao modo automático"
+              : "Thinking automático — clique para forçar sempre"}
+            aria-label="Alternar modo thinking"
+            aria-pressed={statusConfig?.enable_thinking ?? false}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/>
+              <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/>
+            </svg>
+            Thinking
+          </button>
           <button
             onClick={() => void sendMessage()}
             disabled={isLoading || !input.trim()}

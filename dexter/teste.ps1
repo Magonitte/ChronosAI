@@ -1,25 +1,34 @@
-﻿# Voice Assistant - Launcher oficial (Windows)
+﻿# Voice Assistant - Launcher SANDBOX (experimentos / regressao rapida)
+# Inicializador oficial (producao): .\start-all.ps1 — perfil padrao voice-xtts-cuda-partial + LLM on-demand.
+# Use este script para validar mudancas antes de promover para start-all.ps1.
+#
+# LLM voz: Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
+# Uso recomendado:
+#   Baseline CPU:  .\teste.ps1 -Profile voice-xtts-cpu
+#   XTTS CUDA:     .\teste.ps1 -Profile voice-xtts-cuda
+#   CUDA parcial:  .\teste.ps1 -Profile voice-xtts-cuda-partial   (alias: voice-xtts) — recomendado RTX 3070
+# Apos validar, promover alteracoes para start-all.ps1 apenas com revisao explicita.
+#
 # Inicia todos os servidores + o assistente com um unico comando.
 #
-# Uso: .\start-all.ps1 [-Profile ...] ...  |  Sem -Profile: menu interativo (Enter = voice-xtts-cuda-partial).
-#
-# Perfil padrao (producao, validado no sandbox teste.ps1):
-#   voice-xtts-cuda-partial — XTTS CUDA + Llama 8B -ngl 28 (~28/33 GPU); recomendado RTX 3070 8 GB
-#   voice-xtts              — alias de voice-xtts-cuda-partial
-#
-# LLM on-demand (Rust): voz = Llama :8080 + XTTS :8005 no boot; chat = Qwen :8084 ao abrir janela (Shift+T).
-#   Ao fechar o chat, repoe automaticamente Llama + XTTS (aguarde banner na Orb; 1ª carga XTTS pode levar ~1–2 min).
-#
-# Outros perfis: voice-xtts-cuda (-ngl 20), voice-xtts-cpu, voice-chatterbox*, voice-fast, balanced, quality.
-# Sandbox / experimentos: .\teste.ps1 (mesmos perfis; nao altera este script).
-#
-# Se o Windows travar ao subir: .\start-all.ps1 -Profile voice-xtts-safe -EasyOnRam
-# Encerrar tudo: Ctrl+C nesta janela.
+# Uso: .\teste.ps1 [-Profile ...] ...  |  Sem -Profile: menu interativo (terminal com stdin).
+#  Perfis XTTS (Fase 0):
+#    voice-xtts-cpu          — XTTS CPU; Llama -ngl 99 (GPU cheia no LLM; baseline DADOS-PERF)
+#    voice-xtts-cuda         — XTTS CUDA; Llama -ngl 20 (prioriza VRAM para o TTS na RTX 8 GB)
+#    voice-xtts-cuda-partial — XTTS CUDA; Llama -ngl 28 (partilha VRAM LLM+TTS; plano Fase 6)
+#    voice-xtts              — igual a voice-xtts-cuda-partial (compatibilidade)
+#    voice-xtts-safe         — XTTS CPU + contexto 4096; se o PC travar
+#  Se o Windows travar ao subir CUDA: -Profile voice-xtts-safe -EasyOnRam
+# Para encerrar: Ctrl+C (mata todos os processos automaticamente)
 
 param(
-    [ValidateSet("voice-fast", "balanced", "quality", "voice-chatterbox", "voice-chatterbox-cpu", "voice-chatterbox-safe", "voice-xtts", "voice-xtts-cpu", "voice-xtts-cuda", "voice-xtts-cuda-partial", "voice-xtts-safe")]
+    [ValidateSet(
+        "voice-fast", "balanced", "quality",
+        "voice-chatterbox", "voice-chatterbox-cpu", "voice-chatterbox-safe",
+        "voice-xtts", "voice-xtts-cpu", "voice-xtts-cuda", "voice-xtts-cuda-partial", "voice-xtts-safe"
+    )]
     [string]$Profile = "voice-xtts-cuda-partial",
-    [switch]$WithTextLlm,  # DEPRECADO: Qwen sobe on-demand ao abrir chat (Shift+T)
+    [switch]$WithTextLlm,
     [switch]$ForceRestartServices,
     [switch]$KeepStaleFrontend,
     [switch]$NoWhisper,
@@ -34,17 +43,19 @@ $ErrorActionPreference = "Stop"
 
 # Catálogo único: ajuda na tela + menu interativo (quando -Profile nao e passado).
 $script:StartAllProfileCatalog = @(
-    @{ Id = "voice-fast";              Desc = "TTS nativo do Windows; LLM com max GPU (-ngl 99); sem Chatterbox/XTTS em Python." },
-    @{ Id = "balanced";                Desc = "Contexto LLM 8192; TTS Windows; foco equilibrado." },
-    @{ Id = "quality";                 Desc = "Contexto 16k; Chatterbox na GPU; mais exigente em VRAM." },
-    @{ Id = "voice-chatterbox";        Desc = "Clone de voz Chatterbox na GPU; LLM -ngl 28 + contexto 8192 (libera VRAM)." },
-    @{ Id = "voice-chatterbox-cpu";    Desc = "Chatterbox em CPU; LLM -ngl 99; menos disputa de VRAM com o LLM." },
-    @{ Id = "voice-chatterbox-safe";   Desc = "PC com pouca RAM/VRAM: Chatterbox CPU, LLM sem mlock, contexto 4096, pausas entre servicos." },
-    @{ Id = "voice-xtts-cuda-partial"; Desc = "XTTS CUDA + Llama -ngl 28 (~28/33 GPU) — recomendado voz RTX 3070." },
-    @{ Id = "voice-xtts-cuda";         Desc = "XTTS CUDA + Llama -ngl 20 — mais VRAM livre para o TTS." },
-    @{ Id = "voice-xtts";              Desc = "Alias de voice-xtts-cuda-partial (-ngl 28 + XTTS CUDA)." },
-    @{ Id = "voice-xtts-cpu";          Desc = "XTTS v2 em CPU; LLM -ngl 99 na GPU; sem disputa de VRAM com o TTS." },
-    @{ Id = "voice-xtts-safe";         Desc = "Recomendado se o PC trava: XTTS CPU, LLM sem mlock, contexto 4096, pausas entre servicos." }
+  # --- Plano voz: Llama 8B + XTTS (sandbox teste.ps1) ---
+    @{ Id = "voice-xtts-cpu";          Desc = "[sandbox] XTTS CPU; Llama -ngl 99 (33/33 GPU). Baseline DADOS." },
+    @{ Id = "voice-xtts-cuda";         Desc = "[sandbox] XTTS CUDA; Llama -ngl 20 (~20/33 GPU) — mais VRAM para TTS." },
+    @{ Id = "voice-xtts-cuda-partial"; Desc = "[sandbox] XTTS CUDA; Llama -ngl 28 (~28/33 GPU) — recomendado RTX 3070." },
+    @{ Id = "voice-xtts";              Desc = "[sandbox] Alias de voice-xtts-cuda-partial (-ngl 28 + XTTS CUDA)." },
+    @{ Id = "voice-xtts-safe";         Desc = "[sandbox] XTTS CPU, contexto 4096, sem mlock; se travar com CUDA." },
+  # --- Outros (mesmo launcher, modelo Llama 8B) ---
+    @{ Id = "voice-fast";              Desc = "TTS Windows nativo; Llama -ngl 99; sem servidor Python TTS." },
+    @{ Id = "balanced";                Desc = "Contexto 8192; TTS Windows." },
+    @{ Id = "quality";                 Desc = "Contexto 16k; Chatterbox GPU (nao XTTS)." },
+    @{ Id = "voice-chatterbox";        Desc = "Chatterbox CUDA; Llama -ngl 28." },
+    @{ Id = "voice-chatterbox-cpu";    Desc = "Chatterbox CPU; Llama -ngl 99." },
+    @{ Id = "voice-chatterbox-safe";   Desc = "Chatterbox CPU safe; contexto 4096." }
 )
 
 if (-not $PSBoundParameters.ContainsKey('Profile')) {
@@ -105,20 +116,18 @@ if (-not $PSBoundParameters.ContainsKey('Profile')) {
 
 # LLM (llama.cpp)
 $LLAMA_SERVER = "C:\llama.cpp\llama-cpp-turboquant\build\bin\Release\llama-server.exe"
-$LLM_MODEL    = "J:\Modelos LLM\manifests\registry.ollama.ai\library\Gemma4-26B-A4B\gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
-# Llama 8B para perfis voice-xtts-* (ver Documentação/planos/PLANO-VOZ-assistente-rapido-suave.md e Documentação/metricas/METRICA-VOZ-performance-fase0-2026-05-18.md)
-$LLM_MODEL_VOICE = "J:\Modelos LLM\manifests\registry.ollama.ai\library\Llama-3.1-8B\Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
-$LLM_MMPROJ   = "J:\Modelos LLM\manifests\registry.ollama.ai\library\Gemma4-26B-A4B\mmproj-F16.gguf"
-$LLM_PORT     = 8080
-$LLM_NGL      = 99
-$LLM_CPU_MOE  = 33
-
-# LLM texto (Qwen 35B) — carregado on-demand pelo Rust ao abrir chat (Shift+T)
+# Fase 0 — modelo voz (Llama 3.1 8B Instruct)
+$LLM_MODEL    = "J:\Modelos LLM\manifests\registry.ollama.ai\library\Llama-3.1-8B\Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+# Fase 4 — chat texto (Qwen 35B); sobe na 8084 com -WithTextLlm
 $LLM_MODEL_TEXT    = "J:\Modelos LLM\manifests\registry.ollama.ai\library\Qwen3.6-35B-A3B\Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_P.gguf"
 $LLM_PORT_TEXT     = 8084
 $LLM_TEXT_NGL      = 99    # NGL max; Llama e morto antes — ~5-6 GB VRAM livres
 $LLM_TEXT_CTX_SIZE = 16384 # dobro do contexto de voz; seguro com turbo KV
 $LLM_TEXT_TCOUNT   = 6     # seguro com --flash-attn (issue #139: threads<default+flash-attn bug)
+$LLM_MMPROJ   = "J:\Modelos LLM\manifests\registry.ollama.ai\library\Gemma4-26B-A4B\mmproj-F16.gguf"
+$LLM_PORT     = 8080
+$LLM_NGL      = 99
+$LLM_CPU_MOE  = 33
 
 # Whisper STT
 $WHISPER_EXE   = "..\build\bin\Release\whisper-server.exe"
@@ -228,6 +237,7 @@ switch ($Profile) {
         $TTS_MODE = "chatterbox"
     }
     "voice-xtts-cuda" {
+        # XTTS na GPU com prioridade de VRAM: menos camadas do Llama na GPU (RTX 8 GB).
         $LLM_NGL = 20
         $LLM_CONTEXT = 8192
         $LLM_THREADS = 8
@@ -241,7 +251,7 @@ switch ($Profile) {
         $env:DEXTER_TTS_MAX_CHUNK_CHARS = "260"
     }
     "voice-xtts-cuda-partial" {
-        # XTTS CUDA + Llama parcial na GPU (partilha VRAM; referencia PLANO-VOZ / LLM on-demand).
+        # XTTS CUDA + Llama parcial na GPU (partilha VRAM; referencia PLANO-VOZ Fase 6).
         $LLM_NGL = 28
         $LLM_CONTEXT = 8192
         $LLM_THREADS = 8
@@ -255,7 +265,7 @@ switch ($Profile) {
         $env:DEXTER_TTS_MAX_CHUNK_CHARS = "260"
     }
     "voice-xtts" {
-        # Alias de voice-xtts-cuda-partial.
+        # Alias de voice-xtts-cuda-partial (compatibilidade com start-all.ps1).
         $LLM_NGL = 28
         $LLM_CONTEXT = 8192
         $LLM_THREADS = 8
@@ -280,7 +290,6 @@ switch ($Profile) {
         $XTTS_DEVICE = "cpu"
         $TTS_MODE = "xtts"
         $script:UseXtts = $true
-        # XTTS serializa inferencia (lock): menos chunks = menos gaps entre frases.
         $env:DEXTER_TTS_SPLIT_COMMA = "0"
         $env:DEXTER_TTS_MAX_CHUNK_CHARS = "260"
     }
@@ -308,16 +317,7 @@ if ($EasyOnRam) {
 
 if ($Profile -in @("voice-xtts-cuda", "voice-xtts-cuda-partial", "voice-xtts") -and -not $PSBoundParameters.ContainsKey("StartupStaggerSec")) {
     $StartupStaggerSec = 5
-    Write-Host "[Config] Perfil '$Profile' (XTTS CUDA): pausa de ${StartupStaggerSec}s entre servicos. -StartupStaggerSec 0 para desativar." -ForegroundColor Gray
-}
-
-if ($Profile -match '^voice-xtts') {
-    if (Test-Path $LLM_MODEL_VOICE) {
-        $LLM_MODEL = $LLM_MODEL_VOICE
-        Write-Host "[Config] Perfil XTTS: LLM voz = $(Split-Path -Leaf $LLM_MODEL)" -ForegroundColor Gray
-    } else {
-        Write-Host "[Config] Aviso: Llama 8B nao encontrado em $LLM_MODEL_VOICE — usando LLM_MODEL padrao." -ForegroundColor Yellow
-    }
+    Write-Host "[Config] Perfil '$Profile' (XTTS CUDA): pausa de ${StartupStaggerSec}s entre servicos (carga GPU/VRAM). -StartupStaggerSec 0 para desativar." -ForegroundColor Gray
 }
 
 if ($Profile -in @("voice-xtts-safe", "voice-chatterbox-safe") -and -not $PSBoundParameters.ContainsKey("StartupStaggerSec")) {
@@ -554,11 +554,11 @@ Write-Host "  Outras opcoes: -EasyOnRam  -StartupStaggerSec N  -ForceRestartServ
 Write-Host "  Encerrar tudo: Ctrl+C nesta janela." -ForegroundColor DarkGray
 Write-Host ""
 
+Write-Host "[Config] SANDBOX teste.ps1 (plano voz) | LLM: $(Split-Path -Leaf $LLM_MODEL)" -ForegroundColor Cyan
 $xttsDevLine = if ($script:UseXtts) { " | XTTS device: $XTTS_DEVICE | chunk_chars: $($env:DEXTER_TTS_MAX_CHUNK_CHARS) | split_comma: $($env:DEXTER_TTS_SPLIT_COMMA)" } else { "" }
 Write-Host "[Config] Perfil: $Profile | contexto LLM: $LLM_CONTEXT | threads: $LLM_THREADS | ngl: $LLM_NGL | mmproj: $LLM_USE_MMPROJ | mlock: $LLM_USE_MLOCK | TTS: $TTS_MODE$xttsDevLine | stagger: ${StartupStaggerSec}s | EasyOnRam: $EasyOnRam" -ForegroundColor Gray
 if ($Profile -in @("voice-xtts-cuda", "voice-xtts-cuda-partial", "voice-xtts")) {
     Write-Host "[Config] Apos subir: GET http://127.0.0.1:8005/health -> device deve ser 'cuda'. Llama log: offloaded N/33 layers (N ~= ngl $LLM_NGL)." -ForegroundColor DarkGray
-    Write-Host "[Config] Chat texto: Shift+T — Qwen on-demand em :$LLM_PORT_TEXT (primeiro swap ~60–120s; fechar chat repoe voz)." -ForegroundColor DarkGray
 }
 $env:DEXTER_TTS_MODE = $TTS_MODE
 
@@ -618,6 +618,7 @@ if ($llamaOk) {
 
 Invoke-StartupStagger "LLM"
 
+# 1b. LLM texto (Qwen 35B) — DEPRECADO: carregado on-demand pelo Rust ao abrir chat
 if ($WithTextLlm) {
     Write-Warning "[-WithTextLlm DEPRECADO] O Qwen e carregado automaticamente ao abrir o chat (Shift+T). Flag ignorada."
 }
@@ -677,6 +678,34 @@ $env:VISION_CPU_THREADS = $VISION_CPU_THREADS
 $env:VISION_PORT = $VISION_PORT
 $env:LLAMA_SERVER_EXE = $LLAMA_SERVER
 
+# LLM on-demand: parametros do perfil de voz para o Rust gerir swap voz<->texto.
+# Reflectem o perfil activo (ex: voice-xtts-cuda-partial -> NGL=28, CTX=8192).
+# O Rust usa estas vars em ensure_voice_llm / restore_voice_llm_after_chat.
+$env:LLM_VOICE_MODEL_PATH = $LLM_MODEL
+$env:LLM_VOICE_PORT       = $LLM_PORT          # 8080
+$env:LLM_VOICE_NGL        = $LLM_NGL           # 28 no voice-xtts-cuda-partial
+$env:LLM_VOICE_CTX        = $LLM_CONTEXT       # 8192
+$env:LLM_VOICE_THREADS    = $LLM_THREADS       # 8
+$env:LLM_VOICE_MLOCK      = if ($LLM_USE_MLOCK)   { "1" } else { "0" }
+$env:LLM_VOICE_NO_MMAP    = if ($LLM_USE_NO_MMAP) { "1" } else { "0" }
+# LLM texto (Qwen 35B) — spawnar sob demanda ao abrir chat
+$env:LLM_TEXT_MODEL_PATH     = $LLM_MODEL_TEXT
+$env:LLM_TEXT_PORT           = $LLM_PORT_TEXT      # 8084
+$env:LLM_TEXT_NGL            = $LLM_TEXT_NGL       # 99 (Llama morto antes; ~5-6 GB VRAM livres)
+$env:LLM_TEXT_CTX            = $LLM_TEXT_CTX_SIZE  # 16384
+$env:LLM_TEXT_THREADS        = $LLM_TEXT_TCOUNT    # 6
+$env:LLM_TEXT_MLOCK          = "1"
+$env:LLM_TEXT_NO_MMAP        = "1"
+$env:LLM_TEXT_CTX_CHECKPOINTS = "0"               # fix issue #119 (turbo KV + --n-cpu-moe race)
+$env:LLM_CPU_MOE             = $LLM_CPU_MOE        # 33
+
+# ── XTTS (gerido pelo Rust durante swap) ──
+$env:XTTS_SERVER_PATH      = "C:\llama.cpp\xtts-api-server\main.py"
+$env:XTTS_PYTHON_EXE       = "python"
+$env:XTTS_PORT             = "8005"
+$env:XTTS_STARTUP_TIMEOUT_SECS = "180"   # swap voz→chat→voz: 1ª carga CUDA do XTTS pode levar ~1–2 min
+$env:DEXTER_TTS_INFER_DEVICE = if ($script:UseXtts) { $XTTS_DEVICE } else { $CHATTERBOX_DEVICE }
+
 if (-not (Test-Path $VISION_MODEL)) {
     Write-Host "[Vision] Modelo Qwen2.5-VL 3B nao encontrado em: $VISION_MODEL" -ForegroundColor Yellow
     Write-Host "[Vision] Baixe com .\download-vision-model.ps1" -ForegroundColor Gray
@@ -689,33 +718,6 @@ if (-not (Test-Path $VISION_MODEL)) {
     Write-Host "[Vision] O servidor sera iniciado automaticamente na primeira screenshot e desligado apos 5 min ocioso." -ForegroundColor Gray
     Write-Host "[Vision] CPU-only: zero VRAM consumida pelo servidor de visao. Performance via $VISION_CPU_THREADS threads." -ForegroundColor Gray
 }
-
-# LLM on-demand: parametros do perfil activo para o Rust (swap voz <-> texto).
-$env:LLM_VOICE_MODEL_PATH = $LLM_MODEL
-$env:LLM_VOICE_PORT       = $LLM_PORT
-$env:LLM_VOICE_NGL        = $LLM_NGL
-$env:LLM_VOICE_CTX        = $LLM_CONTEXT
-$env:LLM_VOICE_THREADS    = $LLM_THREADS
-$env:LLM_VOICE_MLOCK      = if ($LLM_USE_MLOCK)   { "1" } else { "0" }
-$env:LLM_VOICE_NO_MMAP    = if ($LLM_USE_NO_MMAP) { "1" } else { "0" }
-
-$env:LLM_TEXT_MODEL_PATH      = $LLM_MODEL_TEXT
-$env:LLM_TEXT_PORT            = $LLM_PORT_TEXT
-$env:LLM_TEXT_NGL             = $LLM_TEXT_NGL
-$env:LLM_TEXT_CTX             = $LLM_TEXT_CTX_SIZE
-$env:LLM_TEXT_THREADS         = $LLM_TEXT_TCOUNT
-$env:LLM_TEXT_MLOCK           = "1"
-$env:LLM_TEXT_NO_MMAP         = "1"
-$env:LLM_TEXT_CTX_CHECKPOINTS = "0"
-$env:LLM_CPU_MOE              = $LLM_CPU_MOE
-
-$xttsMainLocal = Join-Path $XTTS_DIR "main.py"
-$env:XTTS_SERVER_PATH = if (Test-Path $xttsMainLocal) { $xttsMainLocal } else { "C:\llama.cpp\xtts-api-server\main.py" }
-$xttsVenvPy = Join-Path $XTTS_DIR ".venv\Scripts\python.exe"
-$env:XTTS_PYTHON_EXE = if (Test-Path $xttsVenvPy) { $xttsVenvPy } else { "python" }
-$env:XTTS_PORT                  = "8005"
-$env:XTTS_STARTUP_TIMEOUT_SECS  = "180"
-$env:DEXTER_TTS_INFER_DEVICE    = if ($script:UseXtts) { $XTTS_DEVICE } else { $CHATTERBOX_DEVICE }
 
 Invoke-StartupStagger "antes do TTS"
 
@@ -893,10 +895,11 @@ if (Test-PortListening -Port $VITE_PORT) {
 }
 
 Write-Host "[App] Iniciando Voice Assistant..." -ForegroundColor Cyan
-Write-Host "[App] Shift+Z = falar | Shift+T = chat texto (Qwen on-demand) | Shift+X = fechar." -ForegroundColor Gray
+Write-Host "[App] Segure Shift+Z para falar, Shift+X para fechar." -ForegroundColor Gray
 Write-Host "[App] Pressione Ctrl+C para encerrar tudo.`n" -ForegroundColor Gray
 
-# Reafirmar env do perfil activo (bloco completo apos Vision) antes do Tauri herdar o processo.
+# App Rust: permite 2 sinteses TTS em paralelo quando o servidor usa CPU (overlap com playback).
+# Override no processo: $env:DEXTER_TTS_PARALLEL = "1" | "2" | ...
 if ($TTS_MODE -eq "windows") {
     $env:DEXTER_TTS_INFER_DEVICE = "windows"
 } elseif (-not $NoTts -and (Test-Path $TTS_SERVER_DIR)) {
@@ -904,9 +907,6 @@ if ($TTS_MODE -eq "windows") {
 } else {
     Remove-Item Env:DEXTER_TTS_INFER_DEVICE -ErrorAction SilentlyContinue
 }
-$env:LLM_VOICE_MODEL_PATH = $LLM_MODEL
-$env:LLM_VOICE_NGL        = $LLM_NGL
-$env:LLM_VOICE_CTX        = $LLM_CONTEXT
 
 # Tauri `AppHandle::restart()` termina o binario com RESTART_EXIT_CODE (= [int32]::MaxValue).
 # Sem este ciclo, o `finally` abaixo corria na 1ª saida e `Stop-AllServers` matava LLM/Whisper/Vite.

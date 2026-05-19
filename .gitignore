@@ -41,6 +41,10 @@ Desktop.ini
 
 # IDE (keep team extensions if you use dexter/.vscode rules)
 .idea/
+.cursor/
+
+# Local app config (machine-specific paths; do not commit)
+config.json
 
 # Local agent caches
 .claude/persist/

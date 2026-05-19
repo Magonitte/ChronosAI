@@ -1,0 +1,16 @@
+{
+  "voices": {
+    "dexter-ptbr": {
+      "name": "dexter-ptbr",
+      "filename": "dexter-ptbr.mp3",
+      "original_filename": "Clone_voz.mp3",
+      "file_extension": ".mp3",
+      "file_size": 411270,
+      "file_hash": "8f34abc5566cbc3d131e168cd174d447",
+      "upload_date": "2026-05-17T02:26:25.193263",
+      "path": "voices\\dexter-ptbr.mp3",
+      "language": "pt"
+    }
+  },
+  "version": "1.0"
+}

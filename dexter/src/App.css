@@ -429,6 +429,42 @@
   box-shadow: none;
 }
 
+.chat-thinking-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 0 13px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.32);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: 160ms ease;
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+
+.chat-thinking-toggle:hover {
+  border-color: rgba(251, 191, 36, 0.38);
+  color: rgba(251, 191, 36, 0.72);
+  background: rgba(251, 191, 36, 0.06);
+}
+
+.chat-thinking-toggle--on {
+  border-color: rgba(251, 191, 36, 0.52);
+  color: rgba(251, 191, 36, 0.95);
+  background: rgba(251, 191, 36, 0.1);
+  box-shadow: 0 0 12px rgba(251, 191, 36, 0.16), inset 0 0 8px rgba(251, 191, 36, 0.06);
+}
+
+.chat-thinking-toggle--on:hover {
+  box-shadow: 0 0 20px rgba(251, 191, 36, 0.28), inset 0 0 10px rgba(251, 191, 36, 0.08);
+}
+
 .chat-shortcuts {
   width: min(100%, 840px);
   margin: 8px auto 0;
@@ -552,5 +588,33 @@
   50% {
     opacity: 1;
     transform: scale(1);
+  }
+}
+
+/* ── LLM swap banner ── */
+.llm-swap-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 22px;
+  background: rgba(251, 191, 36, 0.08);
+  border-bottom: 1px solid rgba(251, 191, 36, 0.18);
+  color: rgba(251, 191, 36, 0.9);
+  font-size: 13px;
+}
+
+.llm-swap-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(251, 191, 36, 0.3);
+  border-top-color: rgba(251, 191, 36, 0.9);
+  animation: llm-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes llm-spin {
+  to {
+    transform: rotate(360deg);
   }
 }

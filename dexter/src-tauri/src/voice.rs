@@ -35,6 +35,243 @@ pub fn strip_paralinguistic_brackets(text: &str) -> String {
     squeeze_spaces(text)
 }
 
+fn markdown_for_tts_pattern() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?mx)
+            \*\*([^*]+)\*\*          # **bold**
+            | \*([^*]+)\*            # *italic*
+            | __([^_]+)__            # __bold__
+            | _([^_]+)_              # _italic_
+            | `([^`]+)`              # `code`
+            | ^\s*#{1,6}\s+          # headings
+            | ^\s*[-*+]\s+           # bullets
+            | ^\s*\d+\.\s+           # numbered lists
+            ",
+        )
+        .expect("static regex")
+    })
+}
+
+fn spoken_punctuation_words_pattern() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b(?:v[ií]rgula|ponto(?:\s+final)?|ponto\s+e\s+v[ií]rgula|dois\s+pontos|tr[eê]s\s+pontos|retic[eê]ncias|interroga[cç][aã]o|exclama[cç][aã]o|abre\s+par[eê]nteses?|fecha\s+par[eê]nteses?|aspas|travess[aã]o|h[ií]fen|barra|asterisco|s[ií]mbolo|comma|period|semicolon|colon|ellipsis|question\s+mark|exclamation\s+mark)\b[,.]?",
+        )
+        .expect("static regex")
+    })
+}
+
+/// Text destined for TTS: no markdown, no spoken punctuation names, gentler symbols for XTTS/SAPI.
+pub fn sanitize_for_tts(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let mut s = strip_paralinguistic_brackets(text);
+
+    // Unwrap markdown inline styles to plain words.
+    loop {
+        let prev = s.clone();
+        s = markdown_for_tts_pattern()
+            .replace_all(&s, |caps: &regex::Captures| {
+                caps.get(1)
+                    .or_else(|| caps.get(2))
+                    .or_else(|| caps.get(3))
+                    .or_else(|| caps.get(4))
+                    .or_else(|| caps.get(5))
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default()
+            })
+            .into_owned();
+        if s == prev {
+            break;
+        }
+    }
+
+    s = spoken_punctuation_words_pattern()
+        .replace_all(&s, " ")
+        .into_owned();
+
+    s = trim_wrapping_quotes(&s);
+
+    // Symbols XTTS often reads aloud literally.
+    s = s
+        .replace(['*', '_', '`', '#', '~', '^', '|', '\\', '{', '}', '[', ']'], " ")
+        .replace('…', ".")
+        .replace("...", ".")
+        .replace('—', " ")
+        .replace('–', " ")
+        .replace('«', " ")
+        .replace('»', " ")
+        .replace('“', " ")
+        .replace('”', " ")
+        .replace('‘', " ")
+        .replace('’', " ")
+        .replace('\"', " ");
+
+    // Colons often become "dois pontos" in bad TTS; use a short pause via comma.
+    s = Regex::new(r"\s*:\s*")
+        .expect("static regex")
+        .replace_all(&s, ", ")
+        .into_owned();
+
+    // Drop empty parentheses and collapse repeated sentence enders.
+    s = Regex::new(r"\(\s*\)")
+        .expect("static regex")
+        .replace_all(&s, " ")
+        .into_owned();
+    s = Regex::new(r"[.!?]{2,}")
+        .expect("static regex")
+        .replace_all(&s, ". ")
+        .into_owned();
+    s = Regex::new(r",\s*,")
+        .expect("static regex")
+        .replace_all(&s, ", ")
+        .into_owned();
+
+    s = normalize_periods_for_xtts(&s);
+
+    squeeze_spaces(&s)
+}
+
+/// XTTS em português costuma vocalizar `.` como a palavra "ponto" (e o LLM às vezes escreve "ponto" no fim).
+fn normalize_periods_for_xtts(s: &str) -> String {
+    let mut s = s.trim().to_string();
+    if s.is_empty() {
+        return s;
+    }
+
+    // "… frase. ponto" / "… frase ponto final" escrito pelo modelo
+    let trailing_spoken = Regex::new(r"(?i)(?:\s*\.?\s*ponto(?:\s+final)?)+\s*$").expect("static regex");
+    loop {
+        let prev = s.clone();
+        s = trailing_spoken.replace_all(&s, "").into_owned();
+        s = s.trim().to_string();
+        if s == prev {
+            break;
+        }
+    }
+
+    // Pausa entre frases no mesmo chunk sem vocalizar "ponto"
+    s = Regex::new(r"\.(\s+)")
+        .expect("static regex")
+        .replace_all(&s, ",$1")
+        .into_owned();
+
+    // Fim do chunk: sem . ! ? (a pausa vem do fim do áudio / próximo chunk)
+    s = Regex::new(r"[.!?]+\s*$")
+        .expect("static regex")
+        .replace_all(&s, "")
+        .into_owned();
+
+    s.trim().trim_end_matches(',').trim().to_string()
+}
+
+fn trim_wrapping_quotes(s: &str) -> String {
+    let mut s = s.trim().to_string();
+    loop {
+        let trimmed = s.trim_matches(|c: char| {
+            matches!(c, '"' | '\'' | '«' | '»' | '“' | '”' | '‘' | '’')
+        });
+        if trimmed.len() == s.len() {
+            break;
+        }
+        s = trimmed.trim().to_string();
+    }
+    while s.starts_with('"') || s.starts_with('«') || s.starts_with('“') {
+        s = s[s.chars().next().map(|c| c.len_utf8()).unwrap_or(1)..]
+            .trim_start()
+            .to_string();
+    }
+    while s.ends_with('"') || s.ends_with('»') || s.ends_with('”') {
+        s = s[..s.len().saturating_sub(1)].trim_end().to_string();
+    }
+    s
+}
+
+/// LLM sometimes emits raw tool-call syntax as spoken text; never send that to TTS.
+pub fn looks_like_leaked_tool_call(text: &str) -> bool {
+    let t = text.to_lowercase();
+    if t.contains("tool_call") || t.contains("<tool_call>") {
+        return true;
+    }
+    if t.contains("parameters")
+        && (t.contains("name,")
+            || t.contains("name ")
+            || t.contains("\"name\"")
+            || t.contains("function"))
+    {
+        return true;
+    }
+    const TOOL_NAMES: &[&str] = &[
+        "web_fetch",
+        "web fetch",
+        "fetch_fx_quote",
+        "fetch_weather",
+        "launch_desktop_app",
+        "launchdesktopapp",
+        "close_desktop_app",
+        "play_music_query",
+        "control_media_playback",
+        "open_url",
+    ];
+    if TOOL_NAMES.iter().any(|n| t.contains(n)) {
+        return true;
+    }
+    t.contains("https://") && t.contains("url") && t.chars().count() < 140
+}
+
+/// Chunks that should not be sent to TTS (meta phrases, not answer content).
+pub fn is_voice_filler_chunk(text: &str) -> bool {
+    let normalized = text
+        .trim()
+        .trim_end_matches(|c: char| matches!(c, ',' | '.' | ':' | ';'))
+        .to_lowercase();
+    const FILLERS: &[&str] = &[
+        "a resposta é",
+        "a resposta e",
+        "em resumo",
+        "resumindo",
+        "em suma",
+        "ou seja",
+        "portanto",
+        "então",
+        "veja só",
+        "veja bem",
+    ];
+    if FILLERS.iter().any(|f| normalized == *f) {
+        return true;
+    }
+    if normalized.starts_with("a resposta") && normalized.chars().count() <= 24 {
+        return true;
+    }
+    false
+}
+
+/// Full pipeline: sanitize + drop filler-only lines. Returns None to skip TTS for this chunk.
+pub fn prepare_voice_sentence_for_tts(raw: &str) -> Option<String> {
+    if looks_like_leaked_tool_call(raw) {
+        eprintln!(
+            "[voice] skip_tts_chunk | tool_leak | text=\"{}\"",
+            raw.chars().take(80).collect::<String>()
+        );
+        return None;
+    }
+    let s = sanitize_for_tts(raw);
+    if s.is_empty() || is_voice_filler_chunk(&s) || looks_like_leaked_tool_call(&s) {
+        if !s.is_empty() {
+            eprintln!(
+                "[voice] skip_tts_chunk | filler | text=\"{}\"",
+                s.chars().take(80).collect::<String>()
+            );
+        }
+        return None;
+    }
+    Some(s)
+}
+
 /// Play a short feedback beep via Windows system speaker.
 /// Only plays when `audio_feedback` is enabled in config.
 pub fn play_mic_beep(config: &VoiceConfig) {
@@ -399,88 +636,20 @@ impl ToolCall {
 }
 
 /// Build tool definitions based on enabled tools in config.
+/// Tools are ordered by frequency of use — LLMs have primacy bias, so
+/// the most-used tools appear first to improve selection accuracy.
 pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> {
     let mut tools = Vec::new();
 
-    if tools_config.search_knowledge {
-        tools.push(serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "search_knowledge",
-                "description": "Pesquisa a base de conhecimento local do usuário por informações relevantes. Use quando a pergunta puder estar em documentos ou anotações armazenados.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Consulta de busca para encontrar conhecimento relevante"
-                        }
-                    },
-                    "required": ["query"]
-                }
-            }
-        }));
-    }
+    // ── TIER 1: Comandos mais frequentes ──
 
-    if tools_config.screenshot {
-        tools.push(serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "take_screenshot",
-                "description": "Captura a tela do usuário e descreve o que está visível. Use quando perguntarem o que há na tela, pedirem para olhar algo ou quiserem ajuda com o que estão vendo.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "question": {
-                            "type": "string",
-                            "description": "O que observar ou descrever na captura. O padrão é uma descrição geral."
-                        }
-                    }
-                }
-            }
-        }));
-    }
-
-    if tools_config.read_clipboard {
-        tools.push(serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "read_clipboard",
-                "description": "Lê o texto atual da área de transferência do usuário. Use quando disserem que copiaram algo ou perguntarem o que há copiado.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {}
-                }
-            }
-        }));
-    }
-
-    if tools_config.open_url {
-        tools.push(serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "open_url",
-                "description": "Abre uma URL no navegador padrão. NÃO use YouTube ou Spotify para tocar uma música PELO NOME quando play_music_query estiver disponível — essa ferramenta busca arquivos locais primeiro. Use open_url para sites em geral, documentos, mapas, etc.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {
-                            "type": "string",
-                            "description": "URL a abrir"
-                        }
-                    },
-                    "required": ["url"]
-                }
-            }
-        }));
-    }
-
+    // 1. get_current_time — "que horas são?", "qual a data?"
     if tools_config.get_current_time {
         tools.push(serde_json::json!({
             "type": "function",
             "function": {
                 "name": "get_current_time",
-                "description": "Obtém a data, a hora e o dia da semana atuais. Use quando perguntarem que horas são ou que dia é.",
+                "description": "Obtém data, hora e dia da semana atuais.",
                 "parameters": {
                     "type": "object",
                     "properties": {}
@@ -489,153 +658,13 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
         }));
     }
 
-    if tools_config.list_apps {
-        tools.push(serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "list_running_apps",
-                "description": "Lista os aplicativos em execução no PC. Use quando perguntarem quais programas estão abertos ou rodando.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {}
-                }
-            }
-        }));
-    }
-
-    if tools_config.web_fetch {
-        tools.push(serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "web_fetch",
-                "description": "Baixa uma página web e devolve o texto. Use para ler artigos, documentação, verificar um site ou obter informação atual da internet.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {
-                            "type": "string",
-                            "description": "URL a buscar"
-                        }
-                    },
-                    "required": ["url"]
-                }
-            }
-        }));
-    }
-
-    if tools_config.run_command {
-        tools.push(serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "run_command",
-                "description": "Executa um comando PowerShell no PC e devolve a saída. Para abrir/fechar apps pré-definidos (Cursor, VS Code, Terminal, navegadores, Office etc.), prefira launch_desktop_app ou close_desktop_app. Para música PELO NOME use play_music_query; para embaralhar a biblioteca inteira use native_music_library_shuffle_play (sem varredura de disco); para playlist M3U por artista use play_local_music_playlist só quando fizer sentido; NUNCA use play_full_local_music_library salvo se o usuário pediu explicitamente um M3U gigante exportado (exige explicit_m3u_export_request true). Para play/pause/pular/volume do que já está tocando, prefira control_media_playback e adjust_system_volume em vez de simular teclas pelo PowerShell.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "Comando shell a executar (PowerShell)"
-                        }
-                    },
-                    "required": ["command"]
-                }
-            }
-        }));
-    }
-
-    if tools_config.launch_desktop_app {
-        tools.push(serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "launch_desktop_app",
-                "description": "Abre um aplicativo de desktop pré-definido no Windows. Prefira isso a run_command quando pedirem para abrir Cursor, VS Code, Terminal do Windows, Chrome, Edge, Discord, OBS, Ferramenta de Captura, Groove/reprodutor de mídia, Excel, Word, PowerPoint ou Outlook. Para fechar, use close_desktop_app.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "app": {
-                            "type": "string",
-                            "enum": [
-                                "cursor",
-                                "vscode",
-                                "terminal",
-                                "chrome",
-                                "edge",
-                                "discord",
-                                "obs",
-                                "snipping_tool",
-                                "media_player",
-                                "groove",
-                                "excel",
-                                "word",
-                                "powerpoint",
-                                "outlook"
-                            ],
-                            "description": "Id do aplicativo: cursor; vscode (VS Code); terminal (Terminal do Windows); chrome; edge; discord; obs (OBS Studio); snipping_tool (captura); media_player ou groove (Groove Music); excel; word; powerpoint; outlook."
-                        }
-                    },
-                    "required": ["app"]
-                }
-            }
-        }));
-        tools.push(serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "close_desktop_app",
-                "description": "Fecha (encerra) um aplicativo pré-definido no Windows parando o processo principal. Mesmos ids que launch_desktop_app. Prefira isto a run_command quando pedirem para fechar ou encerrar esses apps.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "app": {
-                            "type": "string",
-                            "enum": [
-                                "cursor",
-                                "vscode",
-                                "terminal",
-                                "chrome",
-                                "edge",
-                                "discord",
-                                "obs",
-                                "snipping_tool",
-                                "media_player",
-                                "groove",
-                                "excel",
-                                "word",
-                                "powerpoint",
-                                "outlook"
-                            ],
-                            "description": "Mesmos ids que launch_desktop_app."
-                        }
-                    },
-                    "required": ["app"]
-                }
-            }
-        }));
-    }
-
+    // 2. adjust_system_volume — "aumenta volume", "silenciar"
     if tools_config.media_controls {
         tools.push(serde_json::json!({
             "type": "function",
             "function": {
-                "name": "control_media_playback",
-                "description": "Controla a sessão de mídia ativa no Windows (prioriza Groove Music se houver várias). NÃO toca uma música só PELO TÍTULO — para faixa nomeada use play_music_query primeiro. Para TODAS as faixas de um artista em M3U use play_local_music_playlist (não a biblioteca inteira do PC). Para embaralhar/toda a biblioteca use só native_music_library_shuffle_play (rápido, UI do Reprodutor). play_full_local_music_library só se o usuário pedir export M3U gigante por varredura (explicit_m3u_export_request true). Fluxo: (1) Música específica → play_music_query. (2) Playlist por artista → play_local_music_playlist. (3) Biblioteca inteira → native_music_library_shuffle_play. (4) Export M3U explícito → play_full_local_music_library. (5) Senão launch_desktop_app groove/media_player ou open_url e depois control_media_playback play ou toggle. status mostra título e artista quando disponível.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "enum": ["play", "pause", "toggle", "next", "previous", "stop", "status"],
-                            "description": "play: retoma ou inicia se o app permitir (costuma precisar de YouTube ou Spotify abertos); pause; toggle; next/previous; stop; status: tocando agora"
-                        }
-                    },
-                    "required": ["action"]
-                }
-            }
-        }));
-        tools.push(serde_json::json!({
-            "type": "function",
-            "function": {
                 "name": "adjust_system_volume",
-                "description": "Ajusta o volume principal do Windows com teclas multimídia. Use quando pedirem para aumentar, diminuir ou silenciar o volume do sistema (não controles dentro do app). Cada passo é uma pressionamento de tecla (~2% por passo em setups típicos).",
+                "description": "Ajusta o volume principal do Windows: aumentar, diminuir ou silenciar. Use esta tool, não run_command, para controle de volume.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -653,11 +682,230 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
                 }
             }
         }));
+    }
+
+    // 3. launch_desktop_app — "abre o Chrome", "abre o VS Code"
+    if tools_config.launch_desktop_app {
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "launch_desktop_app",
+                "description": "Abre um aplicativo de desktop pré-definido. Use para abrir apps como Chrome, VS Code, Terminal, reprodutor de música, Office, Discord, etc. (veja o parâmetro 'app' para a lista completa).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "app": {
+                            "type": "string",
+                            "enum": [
+                                "cursor",
+                                "vscode",
+                                "terminal",
+                                "chrome",
+                                "edge",
+                                "discord",
+                                "obs",
+                                "snipping_tool",
+                                "media_player",
+                                "groove",
+                                "excel",
+                                "word",
+                                "powerpoint",
+                                "outlook",
+                                "paint"
+                            ],
+                            "description": "Id do aplicativo: cursor; vscode (VS Code); terminal (Terminal do Windows); chrome; edge; discord; obs (OBS Studio); snipping_tool (captura); media_player ou groove (Groove Music); excel; word; powerpoint; outlook; paint (Paint)."
+                        }
+                    },
+                    "required": ["app"]
+                }
+            }
+        }));
+
+        // 4. close_desktop_app — "fecha o Chrome"
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "close_desktop_app",
+                "description": "Fecha um aplicativo pré-definido. Use para fechar/encerrar apps. Mesmos apps disponíveis que launch_desktop_app.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "app": {
+                            "type": "string",
+                            "enum": [
+                                "cursor",
+                                "vscode",
+                                "terminal",
+                                "chrome",
+                                "edge",
+                                "discord",
+                                "obs",
+                                "snipping_tool",
+                                "media_player",
+                                "groove",
+                                "excel",
+                                "word",
+                                "powerpoint",
+                                "outlook",
+                                "paint"
+                            ],
+                            "description": "Mesmos ids que launch_desktop_app."
+                        }
+                    },
+                    "required": ["app"]
+                }
+            }
+        }));
+    }
+
+    // 5. control_media_playback — "pausa", "próxima faixa"
+    if tools_config.media_controls {
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "control_media_playback",
+                "description": "Controla a reprodução de mídia: play, pause, toggle, next, previous, stop, status. Requer que um player ou aba de vídeo já esteja tocando. Para tocar uma música pelo nome, use play_music_query.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["play", "pause", "toggle", "next", "previous", "stop", "status"],
+                            "description": "play: retoma ou inicia se o app permitir (costuma precisar de YouTube ou Spotify abertos); pause; toggle; next/previous; stop; status: tocando agora"
+                        }
+                    },
+                    "required": ["action"]
+                }
+            }
+        }));
+    }
+
+    // ── TIER 2: Comandos de frequência média ──
+
+    // 6. take_screenshot — "o que está na tela?"
+    if tools_config.screenshot {
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "take_screenshot",
+                "description": "Captura a tela e descreve o que está visível.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "O que observar ou descrever na captura. O padrão é uma descrição geral."
+                        }
+                    }
+                }
+            }
+        }));
+    }
+
+    // 7. list_running_apps — "quais apps estão abertos?"
+    if tools_config.list_apps {
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "list_running_apps",
+                "description": "Lista os aplicativos em execução no PC.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        }));
+    }
+
+    // 8. open_url — "abre o site X"
+    if tools_config.open_url {
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "open_url",
+                "description": "Abre uma URL no navegador. Não use para tocar música no YouTube — use play_music_query.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "URL a abrir"
+                        }
+                    },
+                    "required": ["url"]
+                }
+            }
+        }));
+    }
+
+    // 9. fetch_fx_quote + web_fetch — cotação e páginas web
+    if tools_config.web_fetch {
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "fetch_fx_quote",
+                "description": "Cotação cambial atual (dólar, euro, iene, libra em reais). Preferir sobre web_fetch. Pares: USD-BRL, EUR-BRL, JPY-BRL, GBP-BRL.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pair": {
+                            "type": "string",
+                            "description": "Par cambial, ex.: USD-BRL, EUR-BRL"
+                        }
+                    },
+                    "required": ["pair"]
+                }
+            }
+        }));
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "fetch_weather",
+                "description": "Clima atual ou previsão diária. day_offset: omitir = agora; 0 = hoje (máx/mín); 1 = amanhã; 2 = depois de amanhã. location vazio = IP ou DEXTER_WEATHER_CITY.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "Cidade ou região, ex.: São Paulo, Juiz de Fora, JV"
+                        },
+                        "day_offset": {
+                            "type": "integer",
+                            "description": "0=hoje, 1=amanhã, 2=depois de amanhã; omitir para temperatura atual"
+                        }
+                    },
+                    "required": []
+                }
+            }
+        }));
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "web_fetch",
+                "description": "Baixa uma página web e retorna o conteúdo textual.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "URL a buscar"
+                        }
+                    },
+                    "required": ["url"]
+                }
+            }
+        }));
+    }
+
+    // ── TIER 3: Ferramentas de música (menos frequentes) ──
+
+    if tools_config.media_controls {
+        // 10. play_music_query — "toque After Insanity"
         tools.push(serde_json::json!({
             "type": "function",
             "function": {
                 "name": "play_music_query",
-                "description": "Toca uma música pelo título (artista opcional). Use SEMPRE que o usuário disser o nome da faixa — nunca open_url no YouTube para isso. Passo 1: varredura da pasta Música do Windows ([Environment]::MyMusic, pasta Música do perfil, OneDrive Music, Public Music), caminhos das Configurações do Chronos (Pastas de música), variável DEXTER_MUSIC_PATHS, até 200k entradas por raiz, casando pastas e nomes de arquivo. Passo 2: Downloads/Documentos/Desktop com limite menor. Passo 3: YouTube só se não achar local.",
+                "description": "Toca uma música pelo nome (artista opcional). Por padrão busca nas pastas locais do usuário; se não achar, abre no YouTube. Se o usuário disser \"no YouTube\", use prefer_youtube=true. Se pedir \"no player de música\" / reprodutor, use prefer_native_player=true. Não use open_url para música.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -668,17 +916,40 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
                         "artist": {
                             "type": "string",
                             "description": "Artista ou banda opcional para refinar o resultado"
+                        },
+                        "prefer_youtube": {
+                            "type": "boolean",
+                            "description": "true só quando o usuário pedir explicitamente YouTube; pula busca local"
+                        },
+                        "prefer_native_player": {
+                            "type": "boolean",
+                            "description": "true quando pedir player de música / reprodutor / Groove no Windows"
                         }
                     },
                     "required": ["query"]
                 }
             }
         }));
+
+        // 11. native_music_library_shuffle_play — "toca todas as músicas"
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "native_music_library_shuffle_play",
+                "description": "Abre a biblioteca inteira do player de música (Groove) no modo aleatório. Rápido, sem varredura de disco.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        }));
+
+        // 12. play_local_music_playlist — "playlist do Metallica"
         tools.push(serde_json::json!({
             "type": "function",
             "function": {
                 "name": "play_local_music_playlist",
-                "description": "Grava um M3U e abre — use SÓ quando quiserem várias faixas locais por artista/pasta (ex.: «playlist do Metallica», «todas as músicas do Linkin Park»). Mesmas regras de play_music_query (palavras em caminhos/nomes). NUNCA para «biblioteca inteira do PC», «todas as minhas músicas», embaralhar tudo — isso DEVE ser native_music_library_shuffle_play (botão «Ordem aleatoria e reproduzir» no player). Frases de biblioteca inteira aqui são redirecionadas ao shuffle nativo. Não é para streaming.",
+                "description": "Cria uma playlist M3U com as músicas de um artista ou banda e abre no player.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -691,11 +962,13 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
                 }
             }
         }));
+
+        // 13. play_full_local_music_library — export M3U (raro)
         tools.push(serde_json::json!({
             "type": "function",
             "function": {
                 "name": "play_full_local_music_library",
-                "description": "DESATIVADO salvo exportação explícita: LENTO — varredura completa do disco gerando M3U gigante. Chame SÓ se o usuário pediu literalmente criar/exportar playlist grande, M3U por varredura ou listar todos os caminhos de áudio (ex.: VLC). Para ouvir ou embaralhar a biblioteca inteira use native_music_library_shuffle_play (sem varredura). É obrigatório explicit_m3u_export_request true ou a ferramenta recusa. Limite de faixas: DEXTER_MUSIC_FULL_PLAYLIST_MAX.",
+                "description": "Varredura completa do disco gerando M3U gigante. Use apenas para exportação explícita solicitada pelo usuário.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -712,14 +985,62 @@ pub fn build_tools(tools_config: &crate::ToolsConfig) -> Vec<serde_json::Value> 
                 }
             }
         }));
+    }
+
+    // ── TIER 4: Ferramentas de uso esporádico ──
+
+    // 14. search_knowledge — busca em documentos locais
+    if tools_config.search_knowledge {
         tools.push(serde_json::json!({
             "type": "function",
             "function": {
-                "name": "native_music_library_shuffle_play",
-                "description": "RÁPIDO — preferido para tocar a biblioteca inteira: abre o Reprodutor Multimédia / Groove (sem varredura de disco, sem M3U), depois automação de UI clica em Biblioteca de músicas e no botão de embaralhar tudo com rótulo visível «Ordem aleatoria e reproduzir» (UI em português; às vezes sem acento em aleatoria). Usa a biblioteca indexada do player. Se a automação falhar, o usuário toca uma vez. NÃO é para uma música só (play_music_query), NÃO é M3U por artista (play_local_music_playlist), NÃO é export gigante — isso exige play_full_local_music_library com explicit_m3u_export_request true.",
+                "name": "search_knowledge",
+                "description": "Pesquisa a base de conhecimento local por informações relevantes.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Consulta de busca para encontrar conhecimento relevante"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }));
+    }
+
+    // 15. read_clipboard — "o que eu copiei?"
+    if tools_config.read_clipboard {
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "read_clipboard",
+                "description": "Lê o texto atual da área de transferência.",
                 "parameters": {
                     "type": "object",
                     "properties": {}
+                }
+            }
+        }));
+    }
+
+    // 16. run_command — fallback de último recurso
+    if tools_config.run_command {
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "description": "Executa um comando PowerShell no PC e retorna a saída. Use apenas para tarefas que não têm ferramenta dedicada (apps, música, volume, tela, web, etc. têm tools próprias).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Comando shell a executar (PowerShell)"
+                        }
+                    },
+                    "required": ["command"]
                 }
             }
         }));
@@ -825,6 +1146,30 @@ fn should_use_text_chat_thinking(
         || complexity_markers.iter().filter(|term| text.contains(**term)).count() >= 2
 }
 
+async fn emit_voice_sentence_chunk(
+    sentence_tx: &mpsc::Sender<String>,
+    raw: &str,
+    spoken_text: &mut String,
+    sentence_seq: &mut u32,
+    llm_start: std::time::Instant,
+) {
+    let Some(sentence) = prepare_voice_sentence_for_tts(raw) else {
+        return;
+    };
+    let preview: String = sentence.chars().take(40).collect();
+    eprintln!(
+        "[perf] llm_sentence | seq={} | chars={} | elapsed_ms={} | text_preview=\"{}\"",
+        *sentence_seq,
+        sentence.chars().count(),
+        llm_start.elapsed().as_millis(),
+        preview
+    );
+    *sentence_seq += 1;
+    spoken_text.push_str(&sentence);
+    spoken_text.push(' ');
+    let _ = sentence_tx.send(sentence).await;
+}
+
 /// Unified streaming chat using OpenAI-compatible API (llama.cpp).
 pub async fn chat_streaming(
     config: &VoiceConfig,
@@ -837,20 +1182,52 @@ pub async fn chat_streaming(
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
 
+    const VOICE_BREVITY_SUFFIX: &str = "\n\nLIMITE RIGIDO (modo voz): no maximo 3 frases curtas por turno. \
+Nao use listas, titulos nem paragrafos longos. Se a pergunta pedir muito detalhe, resuma em voz e sugira o chat de texto. \
+Nunca escreva o nome dos sinais de pontuacao (vírgula, ponto, dois pontos, etc.) — apenas frases faladas naturais, sem markdown nem asteriscos. \
+Nao comece com \"A resposta é\", \"Em resumo\" ou aspas. Para perguntas informativas simples, responda direto sem chamar ferramentas.";
+    const VOICE_TOOL_ROUTING_SUFFIX: &str = "\n\nRoteamento de ferramentas: para cotacao use fetch_fx_quote (pair USD-BRL, EUR-BRL, JPY-BRL ou GBP-BRL). \
+Para temperatura atual use fetch_weather sem day_offset. Para previsao (amanha, chuva) use day_offset 1 ou 2. location vazio = local por IP. \
+Para outras buscas na web use web_fetch. Use search_knowledge apenas para documentos locais ja indexados no RAG. \
+Para abrir apps use launch_desktop_app. Para tocar musica (incluindo no YouTube) use SEMPRE play_music_query \
+com query e artist opcional — isso abre o video watch?v= com autoplay, nunca use open_url com pagina de busca do YouTube.";
+
     let voice_system_prompt = if !config.system_prompt.trim().is_empty() {
-        config.system_prompt.clone()
+        let base = format!("{}{}", config.system_prompt.trim(), VOICE_BREVITY_SUFFIX);
+        if tools.is_empty() {
+            base
+        } else {
+            format!("{}{}", base, VOICE_TOOL_ROUTING_SUFFIX)
+        }
     } else if config.personality == "coder" {
-        "Voce e um assistente de programacao. Responda em portugues do Brasil. \
+        let base = "Voce e um assistente de programacao. Responda em portugues do Brasil. \
          Mantenha respostas curtas e conversacionais — 2-3 frases no maximo. \
          Sem markdown, sem blocos de codigo. Escreva exatamente como falaria em voz alta. \
          Voce tem acesso a ferramentas para interagir com o sistema do usuario.".to_string()
+            + VOICE_BREVITY_SUFFIX;
+        if tools.is_empty() {
+            base
+        } else {
+            base + VOICE_TOOL_ROUTING_SUFFIX
+        }
     } else if config.personality == "creative" {
-        "Voce e um assistente criativo. Responda em portugues do Brasil. \
+        let base = "Voce e um assistente criativo. Responda em portugues do Brasil. \
          Mantenha respostas curtas e conversacionais — 2-3 frases no maximo. \
          Sem markdown, sem blocos de codigo. Escreva exatamente como falaria em voz alta. \
          Ofereca perspectivas variadas quando relevante.".to_string()
+            + VOICE_BREVITY_SUFFIX;
+        if tools.is_empty() {
+            base
+        } else {
+            base + VOICE_TOOL_ROUTING_SUFFIX
+        }
     } else {
-        config.system_prompt.clone()
+        let base = format!("{}{}", config.system_prompt.trim(), VOICE_BREVITY_SUFFIX);
+        if tools.is_empty() {
+            base
+        } else {
+            format!("{}{}", base, VOICE_TOOL_ROUTING_SUFFIX)
+        }
     };
 
     let mut openai_messages: Vec<OpenAIMessage> = vec![OpenAIMessage {
@@ -880,33 +1257,29 @@ pub async fn chat_streaming(
         });
     }
 
-    // Fix: Gemma 4-style models spend 200-400 tokens in reasoning_content before producing
-    // visible text. A thinking_budget of 0 (unlimited) can consume all tokens. Use 256 to
-    // reserve space for a visible response (~0.5s at 21 tok/s).
-    let thinking_budget_tokens = if config.enable_thinking {
-        if tools.is_empty() { 512 } else { 1024 }
-    } else {
-        0
-    };
-
-    // Short replies for voice when no tools; larger budget when tools are enabled so tool_calls JSON
-    // is not truncated. After a tool transcript exists in history, allow a bit more tokens for the final answer.
-    // Bumped to 600 (was 220) to accommodate 200-400 tokens of reasoning + visible response.
+    // Voice mode always uses short replies — ignore config.response_style (that setting is for text chat).
     let has_tool_history = messages.iter().any(|m| m.role == "tool");
-    let max_tokens = match config.response_style.as_str() {
-        "concise" => if !tools.is_empty() { 512 } else if has_tool_history { 256 } else { 200 },
-        "detailed" => if !tools.is_empty() { 2048 } else if has_tool_history { 1024 } else { 1024 },
-        _ => if !tools.is_empty() { 1024 } else if has_tool_history { 512 } else { 600 },
-    };
+    let max_tokens = voice_max_tokens(!tools.is_empty(), has_tool_history);
+    // Never enable "thinking" on the voice pipeline (saves tokens/latency; text chat uses enable_thinking).
+    let thinking_budget_tokens = 0;
+    eprintln!(
+        "[voice] max_tokens={} | thinking=off | tools={} | tool_history={}",
+        max_tokens,
+        !tools.is_empty(),
+        has_tool_history
+    );
+
+    let llm_model = config.effective_llm_model_voice().to_string();
+    let llm_url = config.effective_llm_url_voice().to_string();
 
     let request = OpenAIChatRequest {
-        model: config.llm_model.clone(),
+        model: llm_model,
         messages: openai_messages,
         stream: true,
         max_tokens,
         temperature: config.temperature,
         chat_template_kwargs: serde_json::json!({
-            "enable_thinking": config.enable_thinking
+            "enable_thinking": false
         }),
         thinking_budget_tokens,
         tools: if tools.is_empty() { None } else { Some(tools.to_vec()) },
@@ -914,7 +1287,7 @@ pub async fn chat_streaming(
 
     let llm_start = std::time::Instant::now();
     let resp = client
-        .post(format!("{}/v1/chat/completions", config.llm_url))
+        .post(format!("{}/v1/chat/completions", llm_url.trim_end_matches('/')))
         .json(&request)
         .send()
         .await?;
@@ -1052,22 +1425,15 @@ pub async fn chat_streaming(
 
                                         if has_tools && xml_open_re.find(&sentence_buffer).is_some() {
                                             let m = xml_open_re.find(&sentence_buffer).unwrap();
-                                            let before =
-                                                strip_paralinguistic_brackets(&sentence_buffer[..m.start()]);
-                                            if !before.is_empty() {
-                                                let preview: String = before.chars().take(40).collect();
-                                                eprintln!(
-                                                    "[perf] llm_sentence | seq={} | chars={} | elapsed_ms={} | text_preview=\"{}\"",
-                                                    sentence_seq,
-                                                    before.chars().count(),
-                                                    llm_start.elapsed().as_millis(),
-                                                    preview
-                                                );
-                                                sentence_seq += 1;
-                                                spoken_text.push_str(&before);
-                                                spoken_text.push(' ');
-                                                let _ = sentence_tx.send(before).await;
-                                            }
+                                            let before = &sentence_buffer[..m.start()];
+                                            emit_voice_sentence_chunk(
+                                                sentence_tx,
+                                                before,
+                                                &mut spoken_text,
+                                                &mut sentence_seq,
+                                                llm_start,
+                                            )
+                                            .await;
                                             let after_tag = &sentence_buffer[m.end()..];
                                             xml_buffer = after_tag.to_string();
                                             sentence_buffer.clear();
@@ -1083,23 +1449,16 @@ pub async fn chat_streaming(
                                             }
                                         } else {
                                             while let Some(split_pos) = find_tts_chunk_end(&sentence_buffer) {
-                                                let sentence: String = sentence_buffer.drain(..=split_pos).collect();
-                                                let sentence =
-                                                    strip_paralinguistic_brackets(sentence.trim());
-                                                if !sentence.is_empty() {
-                                                    let preview: String = sentence.chars().take(40).collect();
-                                                    eprintln!(
-                                                        "[perf] llm_sentence | seq={} | chars={} | elapsed_ms={} | text_preview=\"{}\"",
-                                                        sentence_seq,
-                                                        sentence.chars().count(),
-                                                        llm_start.elapsed().as_millis(),
-                                                        preview
-                                                    );
-                                                    sentence_seq += 1;
-                                                    spoken_text.push_str(&sentence);
-                                                    spoken_text.push(' ');
-                                                    let _ = sentence_tx.send(sentence).await;
-                                                }
+                                                let sentence: String =
+                                                    sentence_buffer.drain(..=split_pos).collect();
+                                                emit_voice_sentence_chunk(
+                                                    sentence_tx,
+                                                    sentence.trim(),
+                                                    &mut spoken_text,
+                                                    &mut sentence_seq,
+                                                    llm_start,
+                                                )
+                                                .await;
                                             }
                                         }
                                     }
@@ -1114,20 +1473,14 @@ pub async fn chat_streaming(
 
     // Flush remaining sentence buffer
     if !xml_collecting {
-        let remaining = strip_paralinguistic_brackets(sentence_buffer.trim());
-        if !remaining.is_empty() {
-            let preview: String = remaining.chars().take(40).collect();
-            eprintln!(
-                "[perf] llm_sentence | seq={} | chars={} | elapsed_ms={} | text_preview=\"{}\"",
-                sentence_seq,
-                remaining.chars().count(),
-                llm_start.elapsed().as_millis(),
-                preview
-            );
-            sentence_seq += 1;
-            spoken_text.push_str(&remaining);
-            let _ = sentence_tx.send(remaining).await;
-        }
+        emit_voice_sentence_chunk(
+            sentence_tx,
+            sentence_buffer.trim(),
+            &mut spoken_text,
+            &mut sentence_seq,
+            llm_start,
+        )
+        .await;
     }
 
     // Flush any remaining pending tool calls
@@ -1251,8 +1604,11 @@ pub async fn chat_streaming_text(
     };
     let use_thinking = should_use_text_chat_thinking(config, messages, tools);
 
+    let llm_model = config.effective_llm_model_text().to_string();
+    let llm_url = config.effective_llm_url_text().to_string();
+
     let request = OpenAIChatRequest {
-        model: config.llm_model.clone(),
+        model: llm_model,
         messages: openai_messages,
         stream: true,
         max_tokens,
@@ -1266,7 +1622,7 @@ pub async fn chat_streaming_text(
 
     let llm_start = std::time::Instant::now();
     let resp = client
-        .post(format!("{}/v1/chat/completions", config.llm_url))
+        .post(format!("{}/v1/chat/completions", llm_url.trim_end_matches('/')))
         .json(&request)
         .send()
         .await?;
@@ -1539,27 +1895,170 @@ fn is_number_context(chars: &[(usize, char)], i: usize) -> bool {
         && chars[i + 1].1.is_ascii_digit()
 }
 
+/// Whether the voice pipeline should expose tool definitions to the LLM for this utterance.
+/// Informational questions (explain, compare, define) should answer directly — not call web_fetch.
+pub fn should_attach_voice_tools(transcript: &str) -> bool {
+    if std::env::var("DEXTER_VOICE_TOOLS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if std::env::var("DEXTER_VOICE_TOOLS")
+        .map(|v| v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    let t = transcript.to_lowercase();
+
+    const EXPLICIT_TOOL: &[&str] = &[
+        "screenshot",
+        "captura de tela",
+        "captura da tela",
+        "print da tela",
+        "que horas",
+        "horas são",
+        "que dia é",
+        "abre o ",
+        "abrir o ",
+        "abra o ",
+        "abre ",
+        "abrir ",
+        "abra ",
+        "abre o chrome",
+        "abre o spotify",
+        "bloco de notas",
+        "notepad",
+        "clipboard",
+        "área de transferência",
+        "toca ",
+        "toque ",
+        "música",
+        "musica",
+        "youtube",
+        "no youtube",
+        "executa ",
+        "rode o comando",
+        "busca na web",
+        "pesquisa na internet",
+        "pesquisa ",
+        "pesquise",
+        "procura na web",
+        "procura o valor",
+        "cotação",
+        "cotacao",
+        "iene",
+        "yen",
+        "euro",
+        "temperatura",
+        "clima",
+        "previsao",
+        "previsão",
+        "previsao do tempo",
+        "vai chover",
+        "como esta o tempo",
+        "olha minha tela",
+        "veja minha tela",
+        "volume ",
+        "pausa a música",
+        "pausa a musica",
+    ];
+
+    if EXPLICIT_TOOL.iter().any(|k| t.contains(k)) {
+        return true;
+    }
+
+    const INFO_ONLY: &[&str] = &[
+        "explique",
+        "explica ",
+        "me explique",
+        "qual a diferença",
+        "quais as diferenças",
+        "diferença entre",
+        "o que é",
+        "o que e ",
+        "como funciona",
+        "por que ",
+        "porque ",
+        "em três frases",
+        "em 3 frases",
+        "três frases curtas",
+        "3 frases curtas",
+        "resuma",
+        "defina ",
+        "me diga o que",
+    ];
+
+    if INFO_ONLY.iter().any(|k| t.contains(k)) {
+        return false;
+    }
+
+    false
+}
+
+/// Token budget for voice-only streaming (`chat_streaming`). Not tied to `config.response_style`.
+pub fn voice_max_tokens(tools_enabled: bool, has_tool_history: bool) -> u32 {
+    if tools_enabled {
+        if has_tool_history {
+            180
+        } else {
+            220
+        }
+    } else if has_tool_history {
+        160
+    } else {
+        120
+    }
+}
+
+/// Max characters per TTS HTTP request (`DEXTER_TTS_MAX_CHUNK_CHARS`, default 140).
+pub fn tts_max_chunk_chars() -> usize {
+    std::env::var("DEXTER_TTS_MAX_CHUNK_CHARS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|n| n.clamp(40, 400))
+        .unwrap_or(260)
+}
+
+/// Split at commas/colons mid-stream (`DEXTER_TTS_SPLIT_COMMA=0` → sentence boundaries only).
+pub fn tts_split_on_commas() -> bool {
+    match std::env::var("DEXTER_TTS_SPLIT_COMMA")
+        .ok()
+        .map(|v| v.trim().to_lowercase())
+        .as_deref()
+    {
+        Some("0") | Some("false") | Some("off") | Some("no") => false,
+        Some("1") | Some("true") | Some("on") | Some("yes") => true,
+        _ => true,
+    }
+}
+
 /// Find a good TTS chunk boundary in the buffer.
-/// Returns the byte index of the last char of the chunk (inclusive).
-fn find_tts_chunk_end(text: &str) -> Option<usize> {
+/// Returns the byte index of the first character AFTER the chunk boundary.
+pub fn find_tts_chunk_end(text: &str) -> Option<usize> {
     const MIN_SOFT_CHUNK_CHARS: usize = 20;
-    const MAX_CHUNK_CHARS: usize = 140;
+    let max_chunk_chars = tts_max_chunk_chars();
+    let split_commas = tts_split_on_commas();
 
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     if chars.is_empty() {
         return None;
     }
 
-    // Voice-first: split at comma/semicolon/colon as soon as there's a
-    // meaningful word before it (≥6 chars).  Avoids splitting "1,5", "10,000".
-    for i in 0..chars.len() {
-        let (_byte_idx, ch) = chars[i];
-        if (ch == ',' || ch == ';' || ch == ':') && i >= 6 {
-            let next_idx = i + 1;
-            if next_idx < chars.len() {
-                let (_, next_ch) = chars[next_idx];
-                if next_ch.is_whitespace() && !is_number_context(&chars, i) {
-                    return Some(chars[next_idx].0);
+    if split_commas {
+        // Voice-first: split at comma/semicolon/colon as soon as there's a
+        // meaningful word before it (≥6 chars).  Avoids splitting "1,5", "10,000".
+        for i in 0..chars.len() {
+            let (_byte_idx, ch) = chars[i];
+            if (ch == ',' || ch == ';' || ch == ':') && i >= 6 {
+                let next_idx = i + 1;
+                if next_idx < chars.len() {
+                    let (_, next_ch) = chars[next_idx];
+                    if next_ch.is_whitespace() && !is_number_context(&chars, i) {
+                        return Some(chars[next_idx].0);
+                    }
                 }
             }
         }
@@ -1580,20 +2079,22 @@ fn find_tts_chunk_end(text: &str) -> Option<usize> {
     }
 
     // Don't force-split tiny buffers (wait for more content).
-    if chars.len() < MAX_CHUNK_CHARS {
+    if chars.len() < max_chunk_chars {
         return None;
     }
 
-    let soft_limit = chars.len().min(MAX_CHUNK_CHARS);
-    // Fallback comma/semicolon/colon between MIN_SOFT_CHUNK_CHARS..soft_limit.
-    for i in (MIN_SOFT_CHUNK_CHARS..soft_limit).rev() {
-        let (_byte_idx, ch) = chars[i];
-        if ch == ',' || ch == ';' || ch == ':' {
-            let next_idx = i + 1;
-            if next_idx < chars.len() {
-                let (_, next_ch) = chars[next_idx];
-                if next_ch.is_whitespace() {
-                    return Some(chars[next_idx].0);
+    let soft_limit = chars.len().min(max_chunk_chars);
+    if split_commas {
+        // Fallback comma/semicolon/colon between MIN_SOFT_CHUNK_CHARS..soft_limit.
+        for i in (MIN_SOFT_CHUNK_CHARS..soft_limit).rev() {
+            let (_byte_idx, ch) = chars[i];
+            if ch == ',' || ch == ';' || ch == ':' {
+                let next_idx = i + 1;
+                if next_idx < chars.len() {
+                    let (_, next_ch) = chars[next_idx];
+                    if next_ch.is_whitespace() {
+                        return Some(chars[next_idx].0);
+                    }
                 }
             }
         }
@@ -1607,7 +2108,9 @@ fn find_tts_chunk_end(text: &str) -> Option<usize> {
         }
     }
 
-    chars.get(MAX_CHUNK_CHARS.saturating_sub(1)).map(|(byte_idx, _)| *byte_idx)
+    chars
+        .get(max_chunk_chars.saturating_sub(1))
+        .map(|(byte_idx, _)| *byte_idx)
 }
 
 // ── Chatterbox TTS ──
@@ -1625,10 +2128,8 @@ pub async fn synthesize(
     text: &str,
     seq: u32,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let text = strip_paralinguistic_brackets(text);
-    if text.is_empty() {
-        return Err("texto vazio apos remover marcadores de fala".into());
-    }
+    let text = prepare_voice_sentence_for_tts(text)
+        .ok_or_else(|| "texto vazio ou filler apos sanitizar para TTS".to_string())?;
     let text = text.as_str();
 
     let tts_mode = std::env::var("DEXTER_TTS_MODE").unwrap_or_default();
@@ -1644,21 +2145,21 @@ pub async fn synthesize(
 
     let preview: String = text.chars().take(40).collect();
     eprintln!(
-        "[perf] tts_start | seq={} | chars={} | backend=chatterbox | text_preview=\"{}\"",
+        "[perf] tts_start | seq={} | chars={} | backend=xtts | text_preview=\"{}\"",
         seq,
         text.chars().count(),
         preview
     );
 
-    // Chatterbox na GPU pode passar de 20s no primeiro chunk (contenda com LLM / JIT CUDA).
+    // XTTS v2 na GPU pode levar ate 15s no primeiro chunk (contenda com LLM / JIT CUDA).
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(60))
         .build()?;
 
     let request = ChatterboxRequest {
         input: text.to_string(),
         voice: config.chatterbox_voice.clone(),
-        model: "chatterbox".to_string(),
+        model: "xtts".to_string(),
         response_format: "wav".to_string(),
     };
 
@@ -1679,7 +2180,7 @@ pub async fn synthesize(
             resp
         }
         Err(err) => {
-            eprintln!("[TTS] Chatterbox indisponivel, usando Windows TTS: {}", err);
+            eprintln!("[TTS] TTS indisponivel, usando Windows TTS: {}", err);
             return synthesize_windows_sapi(text, config.tts_volume).await;
         }
     };
@@ -1687,7 +2188,7 @@ pub async fn synthesize(
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        eprintln!("[TTS] Chatterbox API error {}: {}. Usando Windows TTS.", status, body);
+        eprintln!("[TTS] TTS API error {}: {}. Usando Windows TTS.", status, body);
         return synthesize_windows_sapi(text, config.tts_volume).await;
     }
 

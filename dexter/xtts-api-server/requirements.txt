@@ -1,0 +1,13 @@
+# Fork idiap (Python 3.12+). Instale coqpit-config antes; nao misture com pacote PyPI "coqpit" legado.
+coqpit-config>=0.2.5
+coqui-tts>=0.24.0
+# coqui-tts 0.27.x importa isin_mps_friendly (removido em transformers>=5.1)
+transformers>=4.43.0,<5.1
+torch>=2.0.0
+torchaudio>=2.0.0
+fastapi>=0.100.0
+uvicorn>=0.23.0
+python-multipart>=0.0.6
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+scipy>=1.10.0

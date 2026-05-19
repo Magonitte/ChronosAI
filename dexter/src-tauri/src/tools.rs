@@ -4,11 +4,198 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// ---------------------------------------------------------------------------
+// Crop strategies + Vision intent classification
+// ---------------------------------------------------------------------------
+
+pub enum CropStrategy {
+    Full,
+    Center,
+    TextRegion,
+    Custom(u32, u32, u32, u32),
+}
+
+/// Classificacao semantica da pergunta de visao (para resolucao + max_tokens).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisionIntent {
+    /// "o que esta na tela" — contexto geral, resolucao baixa
+    General,
+    /// "o que esta escrito", "leia o texto" — OCR focado
+    Focused,
+    /// "analise esse codigo", "tem bug?" — precisa de detalhe
+    Detailed,
+}
+
+/// Classifica a intencao da pergunta de visao.
+pub fn classify_vision_intent(text: &str) -> VisionIntent {
+    let q = text.to_lowercase();
+
+    // Detailed: perguntas complexas que precisam de raciocinio
+    let complex_keywords = &[
+        "por que", "explique", "analise", "isso esta certo",
+        "tem problema", "o que devo fazer", "como resolver",
+        "qual o problema", "bug", "erro nesse codigo",
+        "faz sentido", "corrigir", "consertar", "porque",
+        "como faz", "me ajuda",
+    ];
+    if complex_keywords.iter().any(|k| q.contains(k)) {
+        return VisionIntent::Detailed;
+    }
+
+    // Focused: queries de leitura de texto/OCR
+    let focused_keywords = &[
+        "texto", "escrito", "ocr", "leia", "mensagem",
+        "erro", "código", "codigo",
+    ];
+    if focused_keywords.iter().any(|k| q.contains(k)) {
+        return VisionIntent::Focused;
+    }
+
+    VisionIntent::General
+}
+
+/// Resolucao maxima baseada na intencao (dimensao maior).
+fn resolution_for_intent(intent: VisionIntent) -> u32 {
+    match intent {
+        VisionIntent::General => 512,
+        VisionIntent::Focused => 768,
+        VisionIntent::Detailed => 1024,
+    }
+}
+
+/// max_tokens baseado na intencao (evita respostas longas desnecessarias).
+pub fn max_tokens_for_intent(intent: VisionIntent) -> u32 {
+    match intent {
+        VisionIntent::General => 80,
+        VisionIntent::Focused => 120,
+        VisionIntent::Detailed => 150,
+    }
+}
+
+/// Detecta a melhor estrategia de crop com base na pergunta do usuario.
+fn detect_crop_strategy(question: &str) -> CropStrategy {
+    let q = question.to_lowercase();
+
+    if q.contains("erro") || q.contains("texto") || q.contains("escrito") || q.contains("ocr") {
+        return CropStrategy::TextRegion;
+    }
+
+    if q.contains("icone") || q.contains("botao") || q.contains("menu") || q.contains("barra") {
+        return CropStrategy::Center;
+    }
+
+    CropStrategy::Full
+}
+
+/// Valida se a area do crop nao e suspeita (< 20% da imagem original).
+fn is_crop_valid(crop_w: u32, crop_h: u32, full_w: u32, full_h: u32) -> bool {
+    let crop_area = (crop_w as f32) * (crop_h as f32);
+    let full_area = (full_w as f32) * (full_h as f32);
+    if full_area == 0.0 {
+        return false;
+    }
+    crop_area / full_area > 0.20
+}
+
+/// Calcula variancia de luminosidade (proxy para densidade de texto).
+fn image_variance(img: &image::DynamicImage) -> f64 {
+    let gray = img.to_luma8();
+    let pixels: Vec<f64> = gray.pixels().map(|p| p.0[0] as f64).collect();
+    let mean = pixels.iter().sum::<f64>() / pixels.len() as f64;
+    let variance =
+        pixels.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / pixels.len() as f64;
+    variance
+}
+
+/// Aplica crop strategy a imagem, com fallback para full se area suspeita.
+fn apply_crop(img: &image::DynamicImage, strategy: &CropStrategy) -> image::DynamicImage {
+    let (w, h) = (img.width(), img.height());
+
+    match strategy {
+        CropStrategy::Full => img.clone(),
+        CropStrategy::Center => {
+            let cx = w / 4;
+            let cy = h / 4;
+            let cw = w / 2;
+            let ch = h / 2;
+            // Center padrao sempre e > 20% (50% da tela)
+            img.crop_imm(cx, cy, cw, ch)
+        }
+        CropStrategy::TextRegion => {
+            let cell_w = w / 3;
+            let cell_h = h / 3;
+            let mut best_score = 0.0f64;
+            let mut best_x = 0u32;
+            let mut best_y = 0u32;
+
+            for row in 0..3 {
+                for col in 0..3 {
+                    let x = col * cell_w;
+                    let y = row * cell_h;
+                    let cw = cell_w.min(w - x);
+                    let ch = cell_h.min(h - y);
+                    if cw == 0 || ch == 0 {
+                        continue;
+                    }
+                    let sub = img.crop_imm(x, y, cw, ch);
+                    let score = image_variance(&sub);
+                    if score > best_score {
+                        best_score = score;
+                        best_x = x;
+                        best_y = y;
+                    }
+                }
+            }
+
+            let margin = (cell_w / 4).min(cell_h / 4);
+            let cx = best_x.saturating_sub(margin);
+            let cy = best_y.saturating_sub(margin);
+            let cw = (cell_w + 2 * margin).min(w - cx);
+            let ch = (cell_h + 2 * margin).min(h - cy);
+
+            if cw == 0 || ch == 0 || !is_crop_valid(cw, ch, w, h) {
+                eprintln!(
+                    "[vision] crop_fallback | reason=area_suspeita | crop={}x{} | full={}x{} | ratio={:.2}",
+                    cw, ch, w, h,
+                    (cw * ch) as f32 / (w * h) as f32
+                );
+                return img.clone();
+            }
+            img.crop_imm(cx, cy, cw, ch)
+        }
+        CropStrategy::Custom(x, y, cw, ch) => {
+            let cx = (*x).min(w.saturating_sub(1));
+            let cy = (*y).min(h.saturating_sub(1));
+            let ccw = (*cw).min(w.saturating_sub(cx));
+            let cch = (*ch).min(h.saturating_sub(cy));
+            if ccw > 0 && cch > 0 && is_crop_valid(ccw, cch, w, h) {
+                img.crop_imm(cx, cy, ccw, cch)
+            } else {
+                img.clone()
+            }
+        }
+    }
+}
+
 /// Capture the screen on Windows using PowerShell.
-/// Returns the screenshot as a base64-encoded JPEG (resized to max 1280px).
-pub fn take_screenshot(_monitor: Option<u32>) -> Result<String, String> {
+/// Returns the screenshot as a base64-encoded JPEG (resized dynamically, JPEG quality 70).
+pub fn take_screenshot(monitor: Option<u32>) -> Result<String, String> {
+    take_screenshot_region(monitor, None, None, None, None, None)
+}
+
+/// Capture the screen or a region on Windows using PowerShell.
+/// Now supports intelligent crop strategy and dynamic downscale.
+pub fn take_screenshot_region(
+    _monitor: Option<u32>,
+    region_x: Option<u32>,
+    region_y: Option<u32>,
+    region_w: Option<u32>,
+    region_h: Option<u32>,
+    question: Option<&str>,
+) -> Result<String, String> {
     let tmp_raw = std::env::temp_dir().join("voice-assistant-screenshot-raw.png");
     let tmp_jpeg = std::env::temp_dir().join("voice-assistant-screenshot.jpg");
+    let tmp_crop = std::env::temp_dir().join("voice-assistant-screenshot-crop.jpg");
     let raw_str = tmp_raw.to_string_lossy().replace('\\', "\\\\");
     let _jpeg_str = tmp_jpeg.to_string_lossy().replace('\\', "\\\\");
 
@@ -29,7 +216,13 @@ $bitmap.Dispose()
     );
 
     let status = Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_script])
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &ps_script,
+        ])
         .status()
         .map_err(|e| format!("Falha ao executar captura de tela: {}", e))?;
 
@@ -37,29 +230,64 @@ $bitmap.Dispose()
         return Err("Falha ao capturar a tela.".to_string());
     }
 
-    // Resize using the image crate and convert to JPEG
     let img = image::open(&tmp_raw)
         .map_err(|e| format!("Falha ao abrir a captura: {}", e))?;
 
-    let (w, h) = (img.width(), img.height());
-    let max_dim: u32 = 1280;
+    // Determine crop strategy + vision intent
+    let vision_intent = if let Some(q) = question {
+        classify_vision_intent(q)
+    } else {
+        VisionIntent::General
+    };
+
+    let crop_strategy = if let (Some(x), Some(y), Some(w), Some(h)) =
+        (region_x, region_y, region_w, region_h)
+    {
+        CropStrategy::Custom(x, y, w, h)
+    } else if question.is_some() {
+        detect_crop_strategy(question.unwrap())
+    } else {
+        CropStrategy::Full
+    };
+
+    // Apply crop (with fallback for suspicious areas)
+    let cropped = apply_crop(&img, &crop_strategy);
+
+    // Dynamic downscale based on vision intent (not crop strategy)
+    let (w, h) = (cropped.width(), cropped.height());
+    let max_dim: u32 = resolution_for_intent(vision_intent);
+
     let resized = if w > max_dim || h > max_dim {
         if w > h {
             let new_h = (h as f64 * max_dim as f64 / w as f64) as u32;
-            img.resize(max_dim, new_h, image::imageops::FilterType::Lanczos3)
+            cropped.resize(max_dim, new_h, image::imageops::FilterType::Lanczos3)
         } else {
             let new_w = (w as f64 * max_dim as f64 / h as f64) as u32;
-            img.resize(new_w, max_dim, image::imageops::FilterType::Lanczos3)
+            cropped.resize(new_w, max_dim, image::imageops::FilterType::Lanczos3)
         }
     } else {
-        img
+        cropped
     };
 
-    resized
-        .save(&tmp_jpeg)
+    // Salvar JPEG com qualidade reduzida (70 = ~2x menor que padrao 85%, ainda legivel)
+    let mut output_bytes: Vec<u8> = Vec::new();
+    {
+        let mut encoder =
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output_bytes, 70);
+        encoder
+            .encode(
+                resized.as_bytes(),
+                resized.width(),
+                resized.height(),
+                resized.color(),
+            )
+            .map_err(|e| format!("Falha ao codificar JPEG: {}", e))?;
+    }
+    std::fs::write(&tmp_jpeg, &output_bytes)
         .map_err(|e| format!("Falha ao salvar JPEG: {}", e))?;
 
     let _ = std::fs::remove_file(&tmp_raw);
+    let _ = std::fs::remove_file(&tmp_crop);
 
     let bytes = std::fs::read(&tmp_jpeg)
         .map_err(|e| format!("Falha ao ler JPEG da captura: {}", e))?;
@@ -68,19 +296,27 @@ $bitmap.Dispose()
     Ok(STANDARD.encode(&bytes))
 }
 
-/// Describe a screenshot image using llama.cpp's OpenAI-compatible vision API.
+/// Prompt otimizado para respostas de voz curtas do VLM.
+pub const VISION_PROMPT_FAST: &str =
+    "Descreva a tela de forma curta e objetiva para resposta por voz. \
+     Liste apenas os elementos principais: aplicativos abertos, textos relevantes, acoes possiveis. \
+     Seja breve. Maximo 3 frases.";
+
+/// Describe a screenshot image using llama.cpp's OpenAI-compatible vision API (Qwen2.5-VL dedicated server).
+/// Uses optimized prompt + max_tokens for faster responses.
 pub async fn describe_screenshot(
-    llm_url: &str,
+    vision_url: &str,
     model: &str,
     image_b64: &str,
     question: &str,
+    max_tokens: u32,
 ) -> Result<String, String> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
 
-    // OpenAI-compatible vision format
+    // OpenAI-compatible vision format with dynamic max_tokens based on intent
     let body = serde_json::json!({
         "model": model,
         "messages": [{
@@ -98,11 +334,13 @@ pub async fn describe_screenshot(
                 }
             ]
         }],
-        "stream": false
+        "stream": false,
+        "max_tokens": max_tokens,
+        "temperature": 0.3
     });
 
     let resp = client
-        .post(format!("{}/v1/chat/completions", llm_url))
+        .post(format!("{}/v1/chat/completions", vision_url))
         .json(&body)
         .send()
         .await
@@ -892,12 +1130,36 @@ fn youtube_watch_with_autoplay(watch_base: &str) -> String {
     s
 }
 
+/// If the URL is a YouTube search/results page, returns the query text to resolve via `play_music_query`.
+pub fn youtube_search_query_from_open_url(url: &str) -> Option<String> {
+    let lower = url.to_lowercase();
+    if !lower.contains("youtube.com") && !lower.contains("youtu.be") {
+        return None;
+    }
+    if lower.contains("/watch") || lower.contains("youtu.be/") {
+        return None;
+    }
+    if !lower.contains("/results") && !lower.contains("search_query=") {
+        return None;
+    }
+    let marker = "search_query=";
+    let idx = lower.find(marker)?;
+    let rest = &url[idx + marker.len()..];
+    let end = rest.find('&').unwrap_or(rest.len());
+    let encoded = &rest[..end];
+    urlencoding::decode(encoded)
+        .ok()
+        .map(|s| s.into_owned())
+        .filter(|s| !s.trim().is_empty())
+}
+
 /// Resolve a song title (and optional artist) to a YouTube watch URL via public Piped/Invidious APIs, then open it.
-/// Falls back to YouTube search results if no video id is found.
 pub async fn play_music_query(
     title: &str,
     artist: Option<&str>,
     settings_music_paths: Option<&str>,
+    prefer_youtube: bool,
+    prefer_native_player: bool,
 ) -> Result<String, String> {
     let title = title.trim();
     if title.is_empty() {
@@ -908,21 +1170,30 @@ pub async fn play_music_query(
         None => title.to_string(),
     };
 
-    let q_local = q.clone();
-    let settings_owned = settings_music_paths.map(|s| s.to_string());
-    match tokio::task::spawn_blocking(move || {
-        find_best_local_audio_file(&q_local, settings_owned.as_deref())
-    })
-    .await {
-        Ok(Some(path)) => {
-            open_path_default_program(&path)?;
-            return Ok(format!(
-                "Encontrei nos seus arquivos e abri com o reprodutor padrão do Windows: {}",
-                path.display()
-            ));
+    if !prefer_youtube {
+        let q_local = q.clone();
+        let settings_owned = settings_music_paths.map(|s| s.to_string());
+        match tokio::task::spawn_blocking(move || {
+            find_best_local_audio_file(&q_local, settings_owned.as_deref())
+        })
+        .await
+        {
+            Ok(Some(path)) => {
+                if prefer_native_player {
+                    let _ = launch_desktop_app("media_player");
+                    std::thread::sleep(std::time::Duration::from_millis(1200));
+                }
+                open_path_default_program(&path)?;
+                let where_spoken = if prefer_native_player {
+                    "no reprodutor de música"
+                } else {
+                    "da sua biblioteca local"
+                };
+                return Ok(format!("Tocando {:?} {}.", q, where_spoken));
+            }
+            Ok(None) => {}
+            Err(e) => return Err(format!("Busca local: {}", e)),
         }
-        Ok(None) => {}
-        Err(e) => return Err(format!("Busca local: {}", e)),
     }
 
     let local_only = std::env::var("DEXTER_MUSIC_LOCAL_ONLY")
@@ -954,8 +1225,10 @@ pub async fn play_music_query(
     let piped_bases = [
         "https://pipedapi.kavin.rocks",
         "https://pipedapi.in.projectsegfau.lt",
+        "https://pipedapi.leptons.xyz",
+        "https://api.piped.private.coffee",
     ];
-    let piped_filters = ["music_videos", "videos"];
+    let piped_filters = ["music_songs", "music_videos", "videos", "all"];
 
     for base in piped_bases {
         for filter in piped_filters {
@@ -984,7 +1257,7 @@ pub async fn play_music_query(
                 let watch = youtube_watch_with_autoplay(&watch);
                 open_url(&watch)?;
                 return Ok(format!(
-                    "Abri o YouTube para tocar a pesquisa {:?}. Se não começar sozinha, clique em reproduzir — alguns navegadores bloqueiam autoplay até você interagir com a página.",
+                    "Tocando {:?} no YouTube.",
                     q
                 ));
             }
@@ -1007,7 +1280,7 @@ pub async fn play_music_query(
                         let watch = youtube_watch_with_autoplay(&watch);
                         open_url(&watch)?;
                         return Ok(format!(
-                            "Abri o YouTube para {:?}. Se não tocar sozinha, clique em reproduzir.",
+                            "Tocando {:?} no YouTube.",
                             q
                         ));
                     }
@@ -1016,25 +1289,406 @@ pub async fn play_music_query(
         }
     }
 
-    let fallback = format!("https://www.youtube.com/results?search_query={}", enc);
-    open_url(&fallback)?;
-    Ok(format!(
-        "Não achei um vídeo automaticamente. Abri a pesquisa no YouTube para {:?}. Escolha o resultado ou tente de novo com o nome do artista.",
+    Err(format!(
+        "Não encontrei o vídeo no YouTube para {:?}. Fale de novo com o nome da música e do artista.",
         q
     ))
 }
 
 /// Open a URL in the default browser on Windows.
 pub fn open_url(url: &str) -> Result<String, String> {
-    let status = Command::new("cmd")
-        .args(["/c", "start", "", url])
-        .status()
-        .map_err(|e| format!("Falha ao abrir URL: {}", e))?;
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("URL vazia.".to_string());
+    }
+    #[cfg(windows)]
+    {
+        // `cmd start` breaks on `&` in query strings (e.g. watch?v=…&autoplay=1).
+        // FileProtocolHandler passes the URL intact to the default browser.
+        let status = Command::new("rundll32")
+            .arg("url.dll,FileProtocolHandler")
+            .arg(url)
+            .status()
+            .map_err(|e| format!("Falha ao abrir URL: {}", e))?;
 
-    if status.success() {
-        Ok(format!("Abri {} no navegador padrão.", url))
+        if status.success() {
+            Ok(format!("Abri {} no navegador padrão.", url))
+        } else {
+            Err("Falha ao abrir URL.".to_string())
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = url;
+        Err("open_url is only supported on Windows.".to_string())
+    }
+}
+
+fn normalize_fx_pair(pair: &str) -> Result<&'static str, String> {
+    let pair_key = pair.trim().to_uppercase().replace('/', "-");
+    match pair_key.as_str() {
+        "USD-BRL" | "USD" | "DOLAR" | "DÓLAR" => Ok("USD-BRL"),
+        "EUR-BRL" | "EUR" | "EURO" => Ok("EUR-BRL"),
+        "JPY-BRL" | "JPY" | "IENE" | "YEN" => Ok("JPY-BRL"),
+        "GBP-BRL" | "GBP" | "LIBRA" => Ok("GBP-BRL"),
+        _ => Err(format!(
+            "Par de moedas não suportado: {:?}. Use USD-BRL, EUR-BRL, JPY-BRL ou GBP-BRL.",
+            pair
+        )),
+    }
+}
+
+fn fx_label_pt(api_path: &str) -> &'static str {
+    match api_path {
+        "EUR-BRL" => "euro",
+        "JPY-BRL" => "iene",
+        "GBP-BRL" => "libra esterlina",
+        _ => "dólar",
+    }
+}
+
+fn format_fx_quote_text(label: &str, bid: &str, pct: &str, compact: bool) -> String {
+    let pct_f: f64 = pct.parse().unwrap_or(0.0);
+    if compact {
+        let bid_short = bid
+            .parse::<f64>()
+            .map(|v| {
+                let s = format!("{:.2}", v);
+                s.trim_end_matches('0')
+                    .trim_end_matches('.')
+                    .to_string()
+            })
+            .unwrap_or_else(|_| bid.to_string());
+        let pct_short = if pct_f >= 0.0 {
+            format!("alta de {:.0} por cento", pct_f.round())
+        } else {
+            format!("queda de {:.0} por cento", pct_f.abs().round())
+        };
+        return format!("{} a {} reais, {}.", label, bid_short, pct_short);
+    }
+    let pct_spoken = if pct_f >= 0.0 {
+        format!("alta de {:.1} por cento", pct_f)
     } else {
-        Err("Falha ao abrir URL.".to_string())
+        format!("queda de {:.1} por cento", pct_f.abs())
+    };
+    format!(
+        "O {} está a {} reais, com {} nas últimas 24 horas.",
+        label, bid, pct_spoken
+    )
+}
+
+/// Cotação FX em tempo real (AwesomeAPI).
+pub async fn fetch_fx_quote(pair: &str) -> Result<String, String> {
+    fetch_fx_quote_internal(pair, false).await
+}
+
+/// Cotação FX em uma frase curta para TTS por voz (fast-path).
+pub async fn fetch_fx_quote_voice(pair: &str) -> Result<String, String> {
+    fetch_fx_quote_internal(pair, true).await
+}
+
+async fn fetch_fx_quote_internal(pair: &str, compact: bool) -> Result<String, String> {
+    let api_path = normalize_fx_pair(pair)?;
+    let url = format!("https://economia.awesomeapi.com.br/last/{}", api_path);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("Chronos-Dexter/1.0")
+        .build()
+        .map_err(|e| format!("HTTP client: {}", e))?;
+
+    let json: serde_json::Value = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Falha ao buscar cotação: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("Falha ao interpretar cotação: {}", e))?;
+
+    let node_key = api_path.replace('-', "");
+    let node = json
+        .get(&node_key)
+        .or_else(|| json.get(api_path))
+        .ok_or_else(|| format!("Resposta inesperada da API: {}", json))?;
+
+    let bid = node
+        .get("bid")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let pct = node
+        .get("pctChange")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0");
+
+    let label = fx_label_pt(api_path);
+    Ok(format_fx_quote_text(label, bid, pct, compact))
+}
+
+fn wmo_weather_label_pt(code: i64) -> &'static str {
+    match code {
+        0 => "céu limpo",
+        1 | 2 | 3 => "parcialmente nublado",
+        45 | 48 => "neblina",
+        51 | 53 | 55 => "garoa",
+        56 | 57 => "garoa congelante",
+        61 | 63 | 65 => "chuva",
+        66 | 67 => "chuva congelante",
+        71 | 73 | 75 => "neve",
+        77 => "grãos de neve",
+        80 | 81 | 82 => "pancadas de chuva",
+        85 | 86 => "pancadas de neve",
+        95 => "tempestade",
+        96 | 99 => "tempestade com granizo",
+        _ => "condição variável",
+    }
+}
+
+async fn geocode_place(client: &reqwest::Client, name: &str) -> Result<(f64, f64, String), String> {
+    let aliases: &[(&str, &str)] = &[
+        ("jv", "Juiz de Fora"),
+        ("jf", "Juiz de Fora"),
+        ("rj", "Rio de Janeiro"),
+        ("sp", "São Paulo"),
+        ("bh", "Belo Horizonte"),
+        ("bsb", "Brasília"),
+        ("poa", "Porto Alegre"),
+        ("cwb", "Curitiba"),
+    ];
+    let key = name.trim().to_lowercase();
+    let search = aliases
+        .iter()
+        .find(|(abbr, _)| *abbr == key.as_str())
+        .map(|(_, full)| *full)
+        .unwrap_or(name.trim());
+
+    let url = format!(
+        "https://geocoding-api.open-meteo.com/v1/search?name={}&count=1&language=pt&format=json",
+        urlencoding::encode(search)
+    );
+    let json: serde_json::Value = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Falha ao localizar cidade: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("Falha ao interpretar geocoding: {}", e))?;
+
+    let results = json
+        .get("results")
+        .and_then(|v| v.as_array())
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| format!("Cidade não encontrada: {:?}", search))?;
+
+    let first = &results[0];
+    let lat = first
+        .get("latitude")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| "latitude ausente".to_string())?;
+    let lon = first
+        .get("longitude")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| "longitude ausente".to_string())?;
+    let label = first
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(search);
+    let admin1 = first.get("admin1").and_then(|v| v.as_str()).unwrap_or("");
+    let country = first.get("country").and_then(|v| v.as_str()).unwrap_or("");
+    let place = if admin1.is_empty() {
+        format!("{}, {}", label, country)
+    } else {
+        format!("{}, {}, {}", label, admin1, country)
+    };
+    Ok((lat, lon, place))
+}
+
+async fn coords_from_ip(client: &reqwest::Client) -> Result<(f64, f64, String), String> {
+    let json: serde_json::Value = client
+        .get("http://ip-api.com/json/?fields=status,message,lat,lon,city,regionName,country")
+        .send()
+        .await
+        .map_err(|e| format!("Falha na geolocalização por IP: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("Falha ao interpretar geolocalização: {}", e))?;
+
+    if json.get("status").and_then(|v| v.as_str()) != Some("success") {
+        return Err(json
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("geolocalização indisponível")
+            .to_string());
+    }
+    let lat = json.get("lat").and_then(|v| v.as_f64()).ok_or("lat ausente")?;
+    let lon = json.get("lon").and_then(|v| v.as_f64()).ok_or("lon ausente")?;
+    let city = json.get("city").and_then(|v| v.as_str()).unwrap_or("sua região");
+    let region = json
+        .get("regionName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let place = if region.is_empty() {
+        city.to_string()
+    } else {
+        format!("{}, {}", city, region)
+    };
+    Ok((lat, lon, place))
+}
+
+fn weather_day_label_pt(offset: usize) -> &'static str {
+    match offset {
+        0 => "Hoje",
+        1 => "Amanhã",
+        2 => "Depois de amanhã",
+        _ => "Nesse dia",
+    }
+}
+
+/// Clima via Open-Meteo (sem API key). `day_offset`: None = agora; 0 = previsão de hoje; 1 = amanhã; etc.
+pub async fn fetch_weather(
+    location: Option<&str>,
+    day_offset: Option<usize>,
+) -> Result<String, String> {
+    fetch_weather_internal(location, day_offset, false).await
+}
+
+/// Clima em frase curta para TTS por voz (fast-path).
+pub async fn fetch_weather_voice(
+    location: Option<&str>,
+    day_offset: Option<usize>,
+) -> Result<String, String> {
+    fetch_weather_internal(location, day_offset, true).await
+}
+
+async fn fetch_weather_internal(
+    location: Option<&str>,
+    day_offset: Option<usize>,
+    compact: bool,
+) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .user_agent("Chronos-Dexter/1.0")
+        .build()
+        .map_err(|e| format!("HTTP client: {}", e))?;
+
+    let loc_hint = location.map(str::trim).filter(|s| !s.is_empty());
+    let (lat, lon, place) = if let Some(name) = loc_hint {
+        geocode_place(&client, name).await?
+    } else if let Ok(city) = std::env::var("DEXTER_WEATHER_CITY") {
+        let c = city.trim();
+        if c.is_empty() {
+            coords_from_ip(&client).await?
+        } else {
+            geocode_place(&client, c).await?
+        }
+    } else {
+        coords_from_ip(&client).await?
+    };
+
+    let forecast_days = day_offset.map(|d| d + 1).unwrap_or(1).max(3).min(7);
+
+    let url = if day_offset.is_some() {
+        format!(
+            "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}\
+             &daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max\
+             &timezone=auto&forecast_days={}",
+            lat, lon, forecast_days
+        )
+    } else {
+        format!(
+            "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}\
+             &current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code\
+             &timezone=auto",
+            lat, lon
+        )
+    };
+
+    let json: serde_json::Value = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Falha ao buscar clima: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("Falha ao interpretar clima: {}", e))?;
+
+    if let Some(day) = day_offset {
+        let daily = json
+            .get("daily")
+            .ok_or_else(|| "Resposta de clima sem previsão diária".to_string())?;
+        let codes = daily
+            .get("weather_code")
+            .and_then(|v| v.as_array())
+            .ok_or("weather_code ausente")?;
+        let maxs = daily
+            .get("temperature_2m_max")
+            .and_then(|v| v.as_array())
+            .ok_or("temperature_2m_max ausente")?;
+        let mins = daily
+            .get("temperature_2m_min")
+            .and_then(|v| v.as_array())
+            .ok_or("temperature_2m_min ausente")?;
+        let rain = daily
+            .get("precipitation_probability_max")
+            .and_then(|v| v.as_array());
+        if day >= codes.len() {
+            return Err("Previsão não disponível para esse dia.".into());
+        }
+        let code = codes[day].as_i64().unwrap_or(-1);
+        let tmax = maxs[day].as_f64().unwrap_or(0.0);
+        let tmin = mins[day].as_f64().unwrap_or(0.0);
+        let rain_pct = rain
+            .and_then(|a| a.get(day))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let condition = wmo_weather_label_pt(code);
+        let label = weather_day_label_pt(day);
+        let place_short = place.split(',').next().unwrap_or(&place).trim();
+        if compact {
+            return Ok(format!(
+                "{} em {}: máxima {:.0}, mínima {:.0}, {}.",
+                label, place_short, tmax, tmin, condition
+            ));
+        }
+        return Ok(format!(
+            "{} em {}: máxima {:.0} graus, mínima {:.0}, {}, chance de chuva {:.0}%.",
+            label, place, tmax, tmin, condition, rain_pct
+        ));
+    }
+
+    let current = json
+        .get("current")
+        .ok_or_else(|| "Resposta de clima sem campo current".to_string())?;
+
+    let temp = current
+        .get("temperature_2m")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| "temperatura ausente".to_string())?;
+    let feels = current
+        .get("apparent_temperature")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(temp);
+    let humidity = current
+        .get("relative_humidity_2m")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let code = current
+        .get("weather_code")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(-1);
+    let condition = wmo_weather_label_pt(code);
+    let place_short = place.split(',').next().unwrap_or(&place).trim();
+
+    if compact {
+        Ok(format!(
+            "Em {} agora, {:.0} graus, {}.",
+            place_short, temp, condition
+        ))
+    } else {
+        Ok(format!(
+            "Em {} agora: {:.0} graus, sensação de {:.0}, umidade {}%, {}.",
+            place, temp, feels, humidity, condition
+        ))
     }
 }
 
@@ -1280,7 +1934,14 @@ pub fn launch_desktop_app(app: &str) -> Result<String, String> {
 
 #[cfg(windows)]
 fn launch_desktop_app_windows(app: &str) -> Result<String, String> {
-    let key = app.trim().to_lowercase().replace('-', "_");
+    let mut key = app.trim().to_lowercase().replace('-', "_");
+    if key.contains("bloco") && key.contains("notas") {
+        key = "notepad".to_string();
+    } else if key == "crome" || key == "google_crome" {
+        key = "chrome".to_string();
+    } else if key.contains("notepad") {
+        key = "notepad".to_string();
+    }
 
     let label = match key.as_str() {
         "cursor" => {
@@ -1298,6 +1959,10 @@ fn launch_desktop_app_windows(app: &str) -> Result<String, String> {
         "chrome" | "google_chrome" => {
             launch_chrome()?;
             "Google Chrome"
+        }
+        "notepad" | "bloco_de_notas" | "bloco de notas" => {
+            launch_notepad()?;
+            "Bloco de Notas"
         }
         "edge" | "microsoft_edge" | "msedge" => {
             launch_edge()?;
@@ -1337,9 +2002,13 @@ fn launch_desktop_app_windows(app: &str) -> Result<String, String> {
             launch_office_exe("OUTLOOK.EXE")?;
             "Microsoft Outlook"
         }
+        "paint" | "mspaint" => {
+            launch_mspaint()?;
+            "Paint"
+        }
         _ => {
             return Err(format!(
-                "App desconhecido {:?}. Permitidos: cursor, vscode, terminal, chrome, edge, discord, obs, snipping_tool, media_player, excel, word, powerpoint, outlook.",
+                "App desconhecido {:?}. Permitidos: cursor, vscode, terminal, chrome, edge, notepad, discord, obs, snipping_tool, media_player, excel, word, powerpoint, outlook, paint.",
                 app
             ));
         }
@@ -1473,6 +2142,17 @@ fn spawn_simple(candidates: &[&str], desc: &str) -> Result<(), String> {
 }
 
 #[cfg(windows)]
+fn launch_notepad() -> Result<(), String> {
+    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+    let notepad = Path::new(&system_root).join("System32").join("notepad.exe");
+    if notepad.exists() {
+        windows_gui_spawn(&notepad)
+    } else {
+        spawn_simple(&["notepad"], "Bloco de Notas")
+    }
+}
+
+#[cfg(windows)]
 fn launch_chrome() -> Result<(), String> {
     let pf = program_files();
     let pf86 = program_files_x86();
@@ -1549,6 +2229,13 @@ fn launch_obs() -> Result<(), String> {
     try_spawn_paths(&candidates, "OBS").or_else(|_| {
         spawn_simple(&["obs64"], "OBS").map_err(|e| format!("OBS: {}", e))
     })
+}
+
+#[cfg(windows)]
+fn launch_mspaint() -> Result<(), String> {
+    let paths = vec![PathBuf::from(r"C:\Windows\System32\mspaint.exe")];
+    try_spawn_paths(&paths, "Paint")
+        .or_else(|_| spawn_simple(&["mspaint"], "Paint").map_err(|e| format!("{}", e)))
 }
 
 #[cfg(windows)]

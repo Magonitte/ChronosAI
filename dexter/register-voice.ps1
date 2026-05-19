@@ -1,11 +1,11 @@
-# ═══════════════════════════════════════════════════════════════
-# Registrar voz clonada no Chatterbox TTS API
+﻿# ═══════════════════════════════════════════════════════════════
+# Registrar voz clonada no XTTS v2 TTS API
 # ═══════════════════════════════════════════════════════════════
 #
-# Envia o arquivo Clone_voz.mp3 para o servidor Chatterbox e
+# Envia o arquivo Clone_voz.mp3 para o servidor XTTS e
 # registra como voz "dexter-ptbr" com idioma Portugues (pt).
 #
-# Pre-requisito: servidor Chatterbox rodando na porta configurada.
+# Pre-requisito: servidor XTTS rodando na porta configurada.
 # Uso: .\register-voice.ps1
 
 param(
@@ -45,7 +45,7 @@ Write-Host "  Aguardando servidor TTS em $BaseUrl..." -ForegroundColor Cyan
 $ready = $false
 for ($i = 0; $i -lt $MaxRetries; $i++) {
     try {
-        $resp = Invoke-WebRequest -Uri "$BaseUrl/voices" -Method GET -TimeoutSec 3 -ErrorAction SilentlyContinue
+        $resp = Invoke-WebRequest -Uri "$BaseUrl/voices" -Method GET -TimeoutSec 3 -UseBasicParsing -ErrorAction SilentlyContinue
         if ($resp.StatusCode -eq 200) {
             $ready = $true
             break
@@ -59,7 +59,7 @@ for ($i = 0; $i -lt $MaxRetries; $i++) {
 
 if (-not $ready) {
     Write-Host "ERRO: Servidor TTS nao respondeu apos $($MaxRetries * $RetryIntervalSec)s." -ForegroundColor Red
-    Write-Host "  Verifique se o Chatterbox esta rodando na porta $Port" -ForegroundColor Gray
+    Write-Host "  Verifique se o XTTS v2 esta rodando na porta $Port" -ForegroundColor Gray
     exit 1
 }
 
@@ -68,8 +68,9 @@ Write-Host "  Servidor TTS pronto." -ForegroundColor Green
 # ── Verificar se a voz ja existe ──
 
 try {
-    $voicesList = Invoke-RestMethod -Uri "$BaseUrl/voices" -Method GET
-    $existing = $voicesList | Where-Object { $_.name -eq $VoiceName -or $_.voice_name -eq $VoiceName }
+    $voicesResp = Invoke-RestMethod -Uri "$BaseUrl/voices" -Method GET
+    $voicesList = $voicesResp.voices
+    $existing = $voicesList | Where-Object { $_.name -eq $VoiceName }
     if ($existing) {
         Write-Host "  Voz '$VoiceName' ja registrada. Atualizando..." -ForegroundColor Yellow
     }
@@ -85,7 +86,6 @@ $boundary = [System.Guid]::NewGuid().ToString()
 $LF = "`r`n"
 
 $voiceBytes = [System.IO.File]::ReadAllBytes($voicePath.Path)
-$voiceBase64 = $null
 
 $bodyLines = @(
     "--$boundary",
@@ -172,7 +172,8 @@ try {
         -Method POST `
         -ContentType "application/json" `
         -Body $testBody `
-        -TimeoutSec 60
+        -TimeoutSec 60 `
+        -UseBasicParsing
 
     $testFile = Join-Path $PSScriptRoot "test-voice-output.wav"
     [System.IO.File]::WriteAllBytes($testFile, $audioResponse.Content)

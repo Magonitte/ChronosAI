@@ -17,61 +17,56 @@
 
 ## O que é este repositório
 
-**Chronos AI** reúne o código do assistente de voz **Dexter** (aplicativo desktop) e ferramentas auxiliares usadas no desenvolvimento — por exemplo o código-fonte do **whisper.cpp** em `tools/` para compilar o servidor de transcrição localmente.
+**Chronos AI** reúne o aplicativo desktop **Dexter** (Tauri 2 + React) e dependências locais para STT, LLM, TTS e visão. O fluxo completo de voz roda no **Windows**, com serviços HTTP locais orquestrados por scripts PowerShell.
 
 | Área | Descrição |
 |------|-----------|
-| [`dexter/`](dexter/) | Aplicativo **Tauri 2** (Rust + React): captura de voz, STT, chat com LLM, TTS, bandeja do sistema e ferramentas integradas |
-| `tools/whisper.cpp` | Árvore do **whisper.cpp** (servidor de transcrição, quando você compila localmente) |
+| [`dexter/`](dexter/) | App **Tauri 2** (Rust + React): push-to-talk, STT, LLM, TTS, chat de texto, bandeja do sistema, RAG e ferramentas de desktop |
+| [`dexter/xtts-api-server/`](dexter/xtts-api-server/) | API **XTTS v2** (Coqui) — TTS com clonagem PT-BR; perfil de produção recomendado |
+| [`dexter/chatterbox-tts-api/`](dexter/chatterbox-tts-api/) | API **Chatterbox** (alternativa de TTS; perfis `voice-chatterbox*`) |
+| [`tools/whisper.cpp/`](tools/whisper.cpp/) | **whisper.cpp** (upstream) para compilar `whisper-server` localmente |
 
-Visão técnica do app está em [**`dexter/README.md`**](dexter/README.md).
+Documentação técnica detalhada: [**`dexter/README.md`**](dexter/README.md).
 
 ---
 
 ## Principais capacidades
 
 - **Push-to-talk** — segure **Shift+Z** para falar; **Shift+X** oculta o orb.
-- **Pipeline de voz** — áudio → **Whisper** (STT) → **LLM** (API compatível com OpenAI, ex.: llama.cpp) → **Chatterbox** (TTS).
-- **Streaming** — respostas do modelo em fluxo; frases enviadas ao TTS assim que fecham, para menor latência percebida.
-- **Ferramentas (tool calling)** — captura de tela, área de transferência, URLs, horário, processos, comandos em sandbox, busca na web, RAG local, apps do Windows, mídia e volume — ver tabela no README do `dexter`.
-- **Base de conhecimento (RAG)** — SQLite + embeddings para consultar documentos ingeridos localmente.
+- **Pipeline de voz** — microfone → **Whisper** (STT) → **LLM** (Llama 8B em `:8080`) → **XTTS** ou **Chatterbox** (TTS em `:8005`) → alto-falantes.
+- **Fast-path** — comandos frequentes (hora, clipboard, apps, mídia, etc.) executados sem passar pelo LLM quando o texto casa com padrões em português.
+- **LLM on-demand** — voz usa **Llama 8B**; ao abrir o **chat de texto** (**Shift+T**), o app troca para **Qwen** em `:8084` e libera VRAM; ao fechar, repõe Llama + XTTS automaticamente.
+- **Streaming** — tokens do LLM em fluxo; frases completas vão ao TTS assim que fecham (menor latência percebida).
+- **Visão on-demand** — **Qwen2.5-VL** em `:8083` sobe na primeira screenshot e desliga após inatividade.
+- **Ferramentas** — screenshot, clipboard, URLs, horário, processos, sandbox PowerShell, web, RAG, apps Windows, mídia e volume.
+- **RAG** — SQLite + embeddings (BGE-M3 ou servidor compatível com `/embedding`).
+
+---
+
+## Serviços locais (portas padrão)
+
+| Serviço | Porta | Função |
+|---------|-------|--------|
+| LLM voz | **8080** | Llama 3.1 8B (perfis `voice-xtts*`) ou modelo maior nos perfis Chatterbox |
+| Whisper STT | **8081** | Transcrição (`whisper-server`) |
+| Embeddings | **8082** | BGE-M3 para RAG (`llama-server`, opcional com `-NoEmbedding`) |
+| Visão | **8083** | Qwen2.5-VL 3B (on-demand pelo app) |
+| LLM texto | **8084** | Qwen 35B — sobe ao abrir chat (**Shift+T**) |
+| TTS | **8005** | XTTS v2 ou Chatterbox (conforme perfil) |
+| Vite (dev) | **1420** | Frontend React em desenvolvimento |
+
+Ajuste caminhos de executáveis e modelos no topo de **`dexter/start-all.ps1`**.
 
 ---
 
 ## Requisitos (resumo)
 
-- **Windows** é o ambiente principal atualmente suportado para o fluxo completo de voz e ferramentas de desktop.
-- Serviços locais típicos (ajuste portas nos **Configurações** do app):
-  - LLM: **llama.cpp** `llama-server` (ex.: `http://localhost:8080`)
-  - STT: **whisper.cpp** `whisper-server` (ex.: `http://localhost:8081`)
-  - Embeddings (RAG): servidor com rota **`/embedding`** (ex.: segundo `llama-server` em `http://localhost:8082` com modelo **BGE-M3** GGUF) — opcional se o mesmo host do LLM já expuser embeddings compatíveis
-  - TTS: **Chatterbox** (ou modo configurado no `start-all.ps1`) — ver também `dexter/chatterbox-tts-api/`
-- **Node.js**, **Rust**, **Visual Studio Build Tools** (Windows) para compilar o Tauri.
-
-O script **`dexter/start-all.ps1`** orquestra LLM, Whisper, servidor de embeddings (porta 8082 por padrão), TTS, Vite e o Tauri quando aplicável. Perfil **padrão: `voice-chatterbox`**; outros: `voice-fast`, `balanced`, `quality`, **`voice-chatterbox-cpu`** (Chatterbox em CPU para liberar VRAM ao LLM). Parâmetros úteis: `-NoWhisper`, `-NoTts`, `-NoEmbedding`, `-WhisperTiny`, `-ForceRestartServices`. Caminhos de executáveis e modelos **precisam ser ajustados** no topo do script.
-
-Para testar se as portas e o `config.json` batem com os serviços: **`dexter/validate.ps1`**. Para obter o GGUF **BGE-M3** (embeddings): **`dexter/download-bge-m3.ps1`** (ajuste pasta de destino no script).
-
----
-
-## Performance (pipeline de voz)
-
-Métricas coletadas com RTX 3070 8 GB, Gemma 4 26B, Chatterbox Turbo, Whisper small.
-
-| Métrica | Baseline | Otimizado | Melhoria |
-|---|---|---|---|
-| TTFA médio (K1) | 19.3s | **13.0s** | **-33%** |
-| TTS chunk 0 médio | 10.6s | **8.0s** | **-25%** |
-| Token rate LLM (K7) | 6.5 tok/s | **10.1 tok/s** | **+55%** |
-| Respostas vazias | 25% (1/4) | **0% (4/4)** | **100%** |
-
-A otimização completa incluiu:
-- **`thinking_budget_tokens=256`** — força o Gemma 4 a encerrar o raciocínio e entregar resposta visível
-- **`max_tokens=600`** — espaço para reasoning + conteúdo (era 220)
-- **`CFM_TIMESTEPS=2`** — Chatterbox Turbo, ~5x mais rápido na conversão speech token → áudio
-- **Contexto LLM reduzido** de 16384 para 8192 — token rate 3.2x maior sem perda perceptível de coerência
-
-Perfil recomendado: **`voice-chatterbox`** (Chatterbox GPU + Turbo). Notas ou relatórios mais longos podem ficar guardados localmente em `dexter/Documentação/` — essa pasta **não** é enviada para o Git; a tabela acima resume o ganho principal no repositório.
+- **Windows 11** (ambiente principal do fluxo completo).
+- **Node.js**, **Rust**, **Visual Studio Build Tools** (MSVC) para compilar o Tauri.
+- **Python 3.12+** com `uv` (recomendado) para XTTS/Chatterbox.
+- **llama.cpp** — `llama-server` com modelos GGUF (Llama 8B voz, Qwen texto, BGE-M3, Qwen-VL).
+- **whisper.cpp** — `whisper-server` (pode usar a árvore em `tools/whisper.cpp`).
+- **GPU NVIDIA** recomendada para perfis `voice-xtts-cuda-partial` (RTX 8 GB validado).
 
 ---
 
@@ -81,9 +76,15 @@ Perfil recomendado: **`voice-chatterbox`** (Chatterbox GPU + Turbo). Notas ou re
 git clone https://github.com/Magonitte/ChronosAI.git
 cd ChronosAI\dexter
 npm install
-# Configure start-all.ps1 (modelos, caminhos). Depois:
+
+# 1) Edite caminhos em start-all.ps1 (llama-server, modelos, whisper, etc.)
+# 2) Registre a voz clonada (com XTTS no ar):
+.\register-voice.ps1
+
+# 3) Suba todos os serviços + app (perfil padrão: voice-xtts-cuda-partial)
 .\start-all.ps1
-# Em outro terminal, com os serviços no ar:
+
+# Ou só o frontend Tauri, se os serviços já estiverem rodando:
 npm run tauri dev
 ```
 
@@ -93,31 +94,59 @@ Build de produção:
 npm run tauri build
 ```
 
+**Perfil padrão:** `voice-xtts-cuda-partial` — XTTS em CUDA + Llama `-ngl 28` (~28/33 camadas na GPU). Se o PC travar ao subir: `.\start-all.ps1 -Profile voice-xtts-safe -EasyOnRam`.
+
+**Sandbox / testes:** `.\teste.ps1` — mesmos perfis que `start-all.ps1`, para validar mudanças antes de promover.
+
+Parâmetros úteis do launcher: `-NoWhisper`, `-NoTts`, `-NoEmbedding`, `-WhisperTiny`, `-ForceRestartServices`, `-StartupStaggerSec`, `-EasyOnRam`.
+
+---
+
+## Performance (pipeline de voz — Fase 0, maio/2026)
+
+Medições com **RTX 3070 8 GB**, **Llama 3.1 8B**, **XTTS v2 CUDA**, Whisper small. Detalhes em `dexter/Documentação/metricas/METRICA-VOZ-performance-fase0-2026-05-18.md` (pasta local, não versionada no Git).
+
+| Perfil | XTTS | Llama GPU | Gap entre frases (UI) | TTS ~100 chars | LLM tok/s |
+|--------|------|-----------|------------------------|----------------|-----------|
+| `voice-xtts-cpu` | CPU | 33/33 | ~10 s | ~15–35 s | ~55–64 |
+| `voice-xtts-cuda` | CUDA | 20/33 | ~0 ms | ~3,3–5,8 s | ~8–9 |
+| **`voice-xtts-cuda-partial`** | **CUDA** | **28/33** | **~0 ms** | **~3,0–6,6 s** | **~14–16** |
+
+O perfil **`voice-xtts-cuda-partial`** equilibra VRAM entre LLM e TTS: fluência entre frases sem os gaps de ~10 s do baseline CPU, com geração do LLM ~1,7× mais rápida que `-ngl 20`.
+
+Benchmarks históricos com **Gemma 4 + Chatterbox Turbo** permanecem nos relatórios em `dexter/Documentação/`; a stack de produção atual prioriza **Llama 8B + XTTS**.
+
 ---
 
 ## Estrutura do repositório
 
 ```
-ChronosAI/
-├── README.md                 ← você está aqui
-├── dexter/                   ← aplicativo Voice Assistant (Tauri)
-│   ├── README.md             ← visão técnica do Dexter
-│   ├── src/                  ← React (Vite)
-│   ├── src-tauri/            ← Rust (core, voz, ferramentas, RAG)
-│   ├── start-all.ps1         ← orquestra servidores locais (Windows)
-│   ├── validate.ps1          ← verifica LLM / STT / embedding / TTS / config
-│   ├── download-bge-m3.ps1   ← opcional: transfere GGUF BGE-M3 para RAG
-│   └── chatterbox-tts-api/   ← API TTS (quando usada no projeto)
+Chronos_AI_v2/
+├── README.md                      ← você está aqui
+├── config.json                    ← exemplo de config (URLs, tools, atalhos)
+├── dexter/                        ← aplicativo Chronos / Dexter
+│   ├── README.md                  ← visão técnica completa
+│   ├── src/                       ← React (Vite)
+│   ├── src-tauri/                 ← Rust (voz, tools, RAG, LLM on-demand, fast-path)
+│   ├── xtts-api-server/           ← API XTTS v2 (TTS padrão)
+│   ├── chatterbox-tts-api/        ← API Chatterbox (alternativa)
+│   ├── start-all.ps1              ← launcher oficial (Windows)
+│   ├── teste.ps1                  ← launcher sandbox / regressão
+│   ├── register-voice.ps1         ← registra voz dexter-ptbr no XTTS
+│   ├── download-bge-m3.ps1        ← download BGE-M3 (embeddings)
+│   ├── download-vision-model.ps1  ← download Qwen2.5-VL
+│   └── Documentação/              ← planos, métricas, guias (local, .gitignore)
 └── tools/
-    └── whisper.cpp/          ← upstream whisper.cpp (referência / build)
+    └── whisper.cpp/               ← upstream whisper.cpp
 ```
 
 ---
 
 ## Licença
 
-O aplicativo em **`dexter/`** está sob **Apache License 2.0** — ver [`dexter/LICENSE`](dexter/LICENSE).  
-Componentes de terceiros (`tools/whisper.cpp`, etc.) seguem as licenças nos respectivos diretórios.
+O aplicativo em **`dexter/`** está sob **Apache License 2.0** — ver [`dexter/LICENSE`](dexter/LICENSE).
+
+Componentes de terceiros (`tools/whisper.cpp`, `chatterbox-tts-api`, etc.) seguem as licenças nos respectivos diretórios.
 
 ---
 

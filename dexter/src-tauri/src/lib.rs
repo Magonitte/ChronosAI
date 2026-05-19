@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
@@ -10,16 +11,58 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
+mod fast_path;
+mod llm_ondemand;
 mod media_controls;
 mod rag;
 mod sandbox;
 mod tools;
 mod voice;
 
+use llm_ondemand::{
+    ensure_text_llm, ensure_voice_stack_ready, restore_voice_llm_after_chat, schedule_ensure_text_llm,
+    LlmRuntimeMode,
+};
+
+/// Parallel HTTP TTS synthesis jobs (Coqui/Chatterbox). GPU backends stay at 1 to avoid VRAM contention.
+/// Override with `DEXTER_TTS_PARALLEL` (1–8). When unset: CPU inference → 2 slots; CUDA/other → 1.
+fn tts_parallel_inference_slots() -> usize {
+    if let Ok(raw) = std::env::var("DEXTER_TTS_PARALLEL") {
+        if let Ok(n) = raw.trim().parse::<u32>() {
+            return (n as usize).clamp(1, 8);
+        }
+    }
+    let mode = std::env::var("DEXTER_TTS_MODE").unwrap_or_default();
+    if mode.eq_ignore_ascii_case("windows") {
+        return 1;
+    }
+    let device = std::env::var("DEXTER_TTS_INFER_DEVICE").unwrap_or_default();
+    if device.eq_ignore_ascii_case("cpu") {
+        2
+    } else {
+        1
+    }
+}
+
 #[derive(Clone, Serialize)]
 struct ProcessingState {
     stage: String,
     text: String,
+}
+
+/// Atualiza o mini chat (bolhas) com o texto que o assistente está falando.
+fn emit_voice_speaking_bubble(app: &tauri::AppHandle, text: &str) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let _ = app.emit(
+        "processing",
+        ProcessingState {
+            stage: "speaking".to_string(),
+            text: trimmed.to_string(),
+        },
+    );
 }
 
 #[derive(Clone, Serialize)]
@@ -90,6 +133,24 @@ pub struct AppState {
     is_recording: Mutex<bool>,
     // Cancellation token for the active pipeline — cancelled when user interrupts
     pipeline_cancel: Mutex<CancellationToken>,
+    // Vision server on-demand: child process handle + idle timer
+    vision_server_child: Mutex<Option<std::process::Child>>,
+    vision_last_used: Mutex<std::time::Instant>,
+    // ── LLM on-demand swap ──────────────────────────────────────
+    pub voice_llm_child:   Mutex<Option<std::process::Child>>,
+    pub text_llm_child:    Mutex<Option<std::process::Child>>,
+    pub xtts_server_child: Mutex<Option<std::process::Child>>, // gerido pelo ciclo de swap
+    pub llm_mode:          Mutex<LlmRuntimeMode>,
+    pub llm_swap_lock:     tokio::sync::Mutex<()>,
+    pub is_chat_streaming: std::sync::atomic::AtomicBool,
+    pub warm_kill_handle:  Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    /// Token de geracao: incrementado em cada warm-set; tarefa atrasada
+    /// so executa se o token nao mudou — evita "phantom kill".
+    pub warm_kill_token:   std::sync::atomic::AtomicU64,
+    pub warm_ttl_secs:     u64,
+    /// Ultima vez que o chat foi usado (enviou mensagem).
+    /// Permite TTL adaptativo: se nunca usado → mata Qwen imediatamente.
+    pub warm_last_used:    Mutex<Option<std::time::Instant>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -131,6 +192,9 @@ fn default_response_style() -> String {
 }
 fn default_personality() -> String {
     "default".to_string()
+}
+fn default_vision_ngl() -> u32 {
+    10
 }
 
 fn default_shortcut_voice() -> String {
@@ -181,12 +245,28 @@ pub struct VoiceConfig {
     #[serde(default = "default_whisper_url")]
     pub whisper_url: String,
     pub llm_url: String,
+    /// URL do LLM só para o pipeline de voz (vazio = usa `llm_url`).
+    #[serde(default)]
+    pub llm_url_voice: String,
+    /// URL do LLM só para o chat de texto (vazio = `http://127.0.0.1:8084` ou `LLM_TEXT_PORT`).
+    #[serde(default)]
+    pub llm_url_text: String,
     #[serde(default)]
     pub embed_url: String,
+    #[serde(default = "default_vision_url")]
+    pub vision_url: String,
     pub llm_model: String,
+    /// Modelo só para voz (vazio = usa `llm_model`).
+    #[serde(default)]
+    pub llm_model_voice: String,
+    /// Modelo só para chat de texto (vazio = usa `llm_model`).
+    #[serde(default)]
+    pub llm_model_text: String,
     pub embed_model: String,
     #[serde(default)]
     pub vision_model: String,
+    #[serde(default = "default_vision_ngl")]
+    pub vision_ngl: u32,
     pub chatterbox_url: String,
     pub chatterbox_voice: String,
     #[serde(default = "default_tts_volume")]
@@ -226,6 +306,9 @@ pub struct VoiceConfig {
 fn default_whisper_url() -> String {
     "http://localhost:8081".to_string()
 }
+fn default_vision_url() -> String {
+    "http://localhost:8083".to_string()
+}
 
 impl Default for VoiceConfig {
     fn default() -> Self {
@@ -234,17 +317,23 @@ impl Default for VoiceConfig {
             whisper_model_path: default_whisper,
             whisper_url: "http://localhost:8081".to_string(),
             llm_url: "http://localhost:8080".to_string(),
-            embed_url: String::new(),
-            llm_model: "gemma-4-26B-A4B".to_string(),
-            embed_model: "gemma-4-26B-A4B".to_string(),
+            llm_url_voice: String::new(),
+            llm_url_text: "http://127.0.0.1:8084".to_string(),
+            embed_url: "http://localhost:8082".to_string(),
+            vision_url: "http://localhost:8083".to_string(),
+            llm_model: "Meta-Llama-3.1-8B-Instruct-Q4_K_M".to_string(),
+            llm_model_voice: String::new(),
+            llm_model_text: String::new(),
+            embed_model: "bge-m3-Q4_K_M".to_string(),
             vision_model: String::new(), // Use llm_model for vision if empty
+            vision_ngl: 10,
             chatterbox_url: "http://localhost:8005".to_string(),
             chatterbox_voice: "dexter-ptbr".to_string(),
             tts_volume: 100,
             enable_thinking: false,
-            temperature: 0.7,
-            response_style: "normal".to_string(),
-            system_prompt: "Você é um assistente de voz rodando no desktop do usuário. A conversa acontece inteiramente por voz — o usuário fala no microfone, a fala é transcrita via Whisper (STT), enviada como mensagem para você, e sua resposta é convertida de volta em fala pelo motor de voz (TTS; Chatterbox quando disponível, ou voz do Windows em fallback) e reproduzida nos alto-falantes. Você pode ouvir o usuário e ele pode ouvir você — trate como uma conversa falada natural. Se perguntarem \"você me ouve\" a resposta é sim.\n\nIMPORTANTE: Responda SEMPRE em português do Brasil, independentemente do idioma da pergunta.\n\nMantenha respostas curtas e conversacionais — 2-3 frases no máximo. Sem markdown, sem blocos de código, sem bullet points, sem listas numeradas, sem formatação especial. Escreva exatamente como falaria em voz alta. Evite dois-pontos nas respostas pois causam pausas estranhas no TTS.\n\nNÃO use colchetes com sons ou direções de cena (por exemplo [laugh], [chuckle], [sigh]) — o sintetizador fala isso como palavras normais; essas marcas só funcionam em modelos Turbo específicos que este app nem sempre usa. Mostre emoção só com palavras naturais na frase.\n\nQuando decidir usar uma ferramenta, SEMPRE diga o que vai fazer antes em uma frase curta e natural antes de chamar a ferramenta. Por exemplo — \"Deixa eu olhar sua tela\" antes de tirar screenshot, \"Vou procurar isso na web\" antes de buscar uma página, \"Deixa eu ver que horas são\" antes de checar o horário, \"Um segundo, vou rodar esse comando\" antes de executar um comando. Para música: se não houver player ou aba com vídeo aberta, abra com launch_desktop_app media_player ou open_url no YouTube ou Spotify antes de pedir play no control_media_playback. Se o usuário pedir uma música pelo NOME da faixa ou artista, use play_music_query com o título — nunca use open_url para YouTube nesse caso. Essa ferramenta varre primeiro a pasta Música do Windows, pastas equivalentes, as pastas que o usuário configurou nas Configurações em Pastas de música e só depois tenta o YouTube. Se pedirem tocar ou embaralhar TODA a biblioteca de música do PC, tudo de uma vez, ou equivalente, use SEMPRE native_music_library_shuffle_play — abre o Reprodutor Multimédia e usa o fluxo interno «Biblioteca de músicas» e o botão «Ordem aleatoria e reproduzir» (texto visível na UI, sem acento em aleatoria). Nunca varra disco nem gere M3U gigante para isso. play_local_music_playlist só quando quiserem várias faixas locais por um artista ou pasta concreta e aceitarem lista M3U para esse caso. play_full_local_music_library só se pedirem explicitamente exportar ou criar arquivo de lista M3U enorme por varredura — e a ferramenta exige confirmação no parâmetro; caso contrário não chame. Assim o usuário ouve o que está acontecendo em vez de esperar em silêncio.".to_string(),
+            temperature: 0.55,
+            response_style: "concise".to_string(),
+            system_prompt: "Você é um assistente de voz no desktop do usuário. A conversa é por microfone (Whisper) e resposta falada (TTS).\n\nIMPORTANTE: Responda SEMPRE em português do Brasil. Não misture inglês, espanhol ou outros alfabetos.\n\nMantenha 2-3 frases curtas no máximo. Sem markdown, listas ou blocos de código. Escreva como falaria em voz alta.\n\nNÃO use colchetes com sons ou direções de cena — o TTS lê isso como palavras.\n\nPara perguntas informativas simples, responda do conhecimento sem ferramentas. Quando usar uma ferramenta, diga em uma frase curta o que vai fazer antes de chamá-la.".to_string(),
             system_prompt_text: String::new(),
             personality: "default".to_string(),
             audio_feedback: true,
@@ -289,10 +378,198 @@ impl VoiceConfig {
             let _ = std::fs::write(&path, data);
         }
     }
+
+    pub fn effective_llm_url_voice(&self) -> &str {
+        let u = self.llm_url_voice.trim();
+        if u.is_empty() {
+            self.llm_url.trim()
+        } else {
+            u
+        }
+    }
+
+    pub fn effective_llm_model_voice(&self) -> &str {
+        let m = self.llm_model_voice.trim();
+        if m.is_empty() {
+            self.llm_model.trim()
+        } else {
+            m
+        }
+    }
+
+    pub fn effective_llm_url_text(&self) -> &str {
+        let u = self.llm_url_text.trim();
+        if u.is_empty() {
+            DEFAULT_TEXT_LLM_URL.as_str()
+        } else {
+            u
+        }
+    }
+
+    pub fn effective_llm_model_text(&self) -> &str {
+        self.llm_model_text.trim()
+    }
 }
 
-#[tauri::command]
-async fn list_models(llm_url: String) -> Result<Vec<String>, String> {
+static DEFAULT_TEXT_LLM_URL: LazyLock<String> = LazyLock::new(default_text_llm_url);
+
+fn default_text_llm_port() -> u16 {
+    std::env::var("LLM_TEXT_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8084)
+}
+
+fn default_text_llm_url() -> String {
+    format!("http://127.0.0.1:{}", default_text_llm_port())
+}
+
+/// Preenche URL/modelo do chat de texto antes de chamar o LLM (on-demand :8084).
+async fn resolve_text_llm_config(config: &mut VoiceConfig) -> Result<(), String> {
+    if config.llm_url_text.trim().is_empty() {
+        config.llm_url_text = default_text_llm_url();
+    }
+    if config.llm_model_text.trim().is_empty() {
+        let models = fetch_model_ids(&config.llm_url_text).await?;
+        let id = models
+            .into_iter()
+            .next()
+            .ok_or_else(|| "Servidor LLM de texto sem modelos em /v1/models".to_string())?;
+        config.llm_model_text = id;
+    }
+    Ok(())
+}
+
+// ── Vision Server On-Demand ──
+
+/// Check if the vision server HTTP endpoint is responding.
+async fn is_vision_server_ready(port: u16) -> bool {
+    let url = format!("http://127.0.0.1:{}/v1/models", port);
+    match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    {
+        Ok(client) => match client.get(&url).send().await {
+            Ok(resp) => resp.status().is_success(),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
+}
+
+/// Ensure the Qwen2.5-VL vision server is running (starts it on-demand if not).
+/// Uses reduced -ngl (~10) to coexist with the LLM on 8 GB VRAM.
+async fn ensure_vision_server(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let config = state.config.lock().unwrap().clone();
+
+    // Extract port from vision_url (default 8083)
+    let vision_port: u16 = config
+        .vision_url
+        .trim_end_matches('/')
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8083);
+
+    // Already running?
+    if is_vision_server_ready(vision_port).await {
+        *state.vision_last_used.lock().unwrap() = std::time::Instant::now();
+        return Ok(());
+    }
+
+    // Kill orphaned child if any
+    if let Some(mut child) = state.vision_server_child.lock().unwrap().take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    // Resolve paths from environment (set by start-all.ps1) with fallbacks
+    let llama_exe = std::env::var("LLAMA_SERVER_EXE").unwrap_or_else(|_| {
+        r"C:\llama.cpp\llama-cpp-turboquant\build\bin\Release\llama-server.exe".to_string()
+    });
+    let model_path = std::env::var("VISION_MODEL_PATH")
+        .map_err(|_| "VISION_MODEL_PATH não definido (execute start-all.ps1 primeiro)".to_string())?;
+    let mmproj_path = std::env::var("VISION_MMPROJ_PATH")
+        .map_err(|_| "VISION_MMPROJ_PATH não definido (execute start-all.ps1 primeiro)".to_string())?;
+
+    // -ngl: env var from start-all.ps1 overrides config. Default 0 = CPU-only (zero VRAM).
+    let ngl: u32 = std::env::var("VISION_ON_DEMAND_NGL")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    let cpu_threads: u32 = std::env::var("VISION_CPU_THREADS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
+
+    let ctx: u32 = 4096;
+
+    eprintln!(
+        "[Vision] Iniciando servidor on-demand | port={} | ngl={} | cpu_threads={} | ctx={}",
+        vision_port, ngl, cpu_threads, ctx
+    );
+
+    let vision_start = std::time::Instant::now();
+
+    let child = std::process::Command::new(&llama_exe)
+        .args([
+            "-m", &model_path,
+            "--mmproj", &mmproj_path,
+            "--port", &vision_port.to_string(),
+            "--host", "127.0.0.1",
+            "-ngl", &ngl.to_string(),
+            "-c", &ctx.to_string(),
+            "-t", &cpu_threads.to_string(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Falha ao spawnar servidor de visão: {}", e))?;
+
+    *state.vision_server_child.lock().unwrap() = Some(child);
+
+    // Wait for the server to be ready
+    let timeout = std::time::Duration::from_secs(30);
+    let _vision_url = config.vision_url.clone();
+
+    while vision_start.elapsed() < timeout {
+        if is_vision_server_ready(vision_port).await {
+            let elapsed = vision_start.elapsed().as_secs_f32();
+            eprintln!(
+                "[perf] vision_server_start | elapsed_s={:.1} | ngl={} | port={}",
+                elapsed, ngl, vision_port
+            );
+            *state.vision_last_used.lock().unwrap() = std::time::Instant::now();
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    // Timeout — kill the child we spawned
+    if let Some(mut child) = state.vision_server_child.lock().unwrap().take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    Err(format!(
+        "Servidor de visão não respondeu após {}s na porta {}",
+        timeout.as_secs(),
+        vision_port
+    ))
+}
+
+/// Kill the vision server child process (if running).
+fn kill_vision_server(state: &AppState) {
+    if let Some(mut child) = state.vision_server_child.lock().unwrap().take() {
+        eprintln!("[Vision] Encerrando servidor de visão...");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+async fn fetch_model_ids(llm_url: &str) -> Result<Vec<String>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -321,6 +598,11 @@ async fn list_models(llm_url: String) -> Result<Vec<String>, String> {
         .collect();
 
     Ok(models)
+}
+
+#[tauri::command]
+async fn list_models(llm_url: String) -> Result<Vec<String>, String> {
+    fetch_model_ids(&llm_url).await
 }
 
 #[tauri::command]
@@ -357,6 +639,12 @@ fn resume_global_shortcuts(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn restart_app(app: tauri::AppHandle) {
     app.restart();
+}
+
+/// Repete métricas `[perf]` do frontend em stderr (mesma consola que `cargo run` / start-all).
+#[tauri::command]
+fn log_frontend_perf(line: String) {
+    eprintln!("{}", line);
 }
 
 #[tauri::command]
@@ -506,8 +794,11 @@ fn bring_chat_to_front(window: &tauri::WebviewWindow) {
 }
 
 fn open_chat_window(app: &tauri::AppHandle) {
+    schedule_ensure_text_llm(app);
+
     if let Some(window) = app.get_webview_window("chat") {
         bring_chat_to_front(&window);
+        schedule_ensure_text_llm(app); // reabrir chat com QwenWarm ou apos TTL parcial deve re-disparar ensure
         return;
     }
 
@@ -551,6 +842,13 @@ fn open_chat_window(app: &tauri::AppHandle) {
         if let Some((wa_bottom, win_w_px)) = clip_args {
             clip_chat_window_inner_height_to_work_area(&window, wa_bottom, win_w_px);
         }
+
+        let app_ev = app.clone();
+        window.on_window_event(move |event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                restore_voice_llm_after_chat(app_ev.clone());
+            }
+        });
     }
 }
 
@@ -665,6 +963,20 @@ fn stop_recording_and_process(app: tauri::AppHandle) -> Result<(), String> {
     let cancel_token = state.pipeline_cancel.lock().unwrap().clone();
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
+        {
+            let _ = app_handle.emit("processing", ProcessingState {
+                stage: "processing".to_string(),
+                text: "Preparando modo voz (Llama + XTTS)...".to_string(),
+            });
+            if let Err(e) = ensure_voice_stack_ready(&app_handle).await {
+                let _ = app_handle.emit("processing", ProcessingState {
+                    stage: "error".to_string(),
+                    text: e,
+                });
+                return;
+            }
+        }
+
         if let Err(e) = process_pipeline(app_handle.clone(), samples, sample_rate, config, cancel_token).await {
             if e != "interrupted" {
                 eprintln!("Pipeline error: {}", e);
@@ -689,20 +1001,33 @@ async fn send_chat_message(app: tauri::AppHandle, text: String) -> Result<(), St
         return Ok(());
     }
 
+    ensure_text_llm(&app).await.map_err(|e| {
+        let _ = app.emit("llm_swap_failed", e.clone()); e
+    })?;
+
+    // Registar uso para TTL adaptativo do warm cache
+    *app.state::<AppState>().warm_last_used.lock().unwrap() = Some(std::time::Instant::now());
+
     let _ = app.emit("chat_processing_started", ());
     struct ChatProcessingEnd<'a>(&'a tauri::AppHandle);
     impl Drop for ChatProcessingEnd<'_> {
         fn drop(&mut self) {
             let _ = self.0.emit("chat_processing_ended", ());
+            // Limpar flag de streaming
+            self.0.state::<AppState>()
+                .is_chat_streaming
+                .store(false, std::sync::atomic::Ordering::SeqCst);
         }
     }
     let _chat_processing_end = ChatProcessingEnd(&app);
 
-    let config = {
-        let state = app.state::<AppState>();
-        let config = state.config.lock().unwrap().clone();
-        config
-    };
+    // Sinalizar streaming activo (bloqueia swap durante resposta)
+    app.state::<AppState>()
+        .is_chat_streaming
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let mut config = app.state::<AppState>().config.lock().unwrap().clone();
+    resolve_text_llm_config(&mut config).await?;
 
     {
         let state = app.state::<AppState>();
@@ -759,7 +1084,7 @@ async fn send_chat_message(app: tauri::AppHandle, text: String) -> Result<(), St
                                     text: tool_call.name.clone(),
                                 },
                             );
-                            let result_text = execute_tool(&app_clone, &config_clone, tool_call).await;
+                            let result_text = execute_tool(&app_clone, &config_clone, tool_call, false).await;
                             tool_results.push_str(&format!(
                                 "[Resultado da ferramenta {}]: {}\n",
                                 tool_call.name, result_text
@@ -805,7 +1130,7 @@ async fn send_chat_message(app: tauri::AppHandle, text: String) -> Result<(), St
                                     text: tool_call.name.clone(),
                                 },
                             );
-                            let result_text = execute_tool(&app_clone, &config_clone, tool_call).await;
+                            let result_text = execute_tool(&app_clone, &config_clone, tool_call, false).await;
                             let tool_msg = ChatMessage {
                                 role: "tool".to_string(),
                                 content: result_text,
@@ -971,6 +1296,335 @@ async fn process_pipeline(
             .push(chat_message("user", transcript.clone()));
     }
 
+    // ── Fast-Path Layer: commands simples bypass LLM ──
+    let mut embed_url = config.embed_url.clone();
+    if embed_url.is_empty() {
+        embed_url = config.llm_url.clone();
+    }
+
+    let fast_start = std::time::Instant::now();
+    let fast_result = fast_path::fast_path_match(&transcript, &embed_url).await;
+
+    match fast_result {
+        fast_path::FastPathResult::Hit(action) => {
+            let tool_name = action.tool_name.clone();
+            eprintln!(
+                "[perf] fast_path_hit | tool={} | vision={} | transcript=\"{}\"",
+                tool_name, action.needs_vision, transcript
+            );
+
+            if action.needs_vision {
+                // ── Fast-path visao: screenshot → VLM direto (sem LLM) ──
+                // Spawn screenshot em paralelo com ensure_vision_server
+                let vision_url = if config.vision_url.is_empty() {
+                    config.llm_url.clone()
+                } else {
+                    config.vision_url.clone()
+                };
+                let vision_model = if config.vision_model.is_empty() {
+                    "qwen2.5-vl-3b-instruct".to_string()
+                } else {
+                    config.vision_model.clone()
+                };
+
+                let question = action
+                    .tool_args
+                    .get("question")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Descreva a tela de forma curta e objetiva.")
+                    .to_string();
+
+                let screenshot_b64 = tools::take_screenshot(None)
+                    .map_err(|e| format!("Falha ao capturar tela: {}", e))?;
+
+                if let Err(e) = ensure_vision_server(&app).await {
+                    return Err(format!("Falha ao iniciar servidor de visao: {}", e));
+                }
+
+                let vision_intent = tools::classify_vision_intent(&question);
+                let max_tokens = tools::max_tokens_for_intent(vision_intent);
+                let description = tools::describe_screenshot(
+                    &vision_url,
+                    &vision_model,
+                    &screenshot_b64,
+                    &question,
+                    max_tokens,
+                )
+                .await
+                .map_err(|e| format!("Falha na descricao da tela: {}", e))?;
+
+                // Atualizar timestamp do servidor de visao
+                *app.state::<AppState>().vision_last_used.lock().unwrap() =
+                    std::time::Instant::now();
+
+                let is_complex = fast_path::is_complex_vision_query(&transcript);
+                if is_complex {
+                    // Query complexa: VLM descreveu → envia para LLM raciocinar (sem tools)
+                    let follow_up = format!(
+                        "O usuario perguntou: \"{}\"\n\nA tela mostra: {}\n\nResponda de forma concisa em portugues.",
+                        transcript, description
+                    );
+                    {
+                        app.state::<AppState>()
+                            .messages
+                            .lock()
+                            .unwrap()
+                            .push(chat_message("user", follow_up.clone()));
+                    }
+                    let msgs = app.state::<AppState>().messages.lock().unwrap().clone();
+                    let (sentence_tx, mut sentence_rx) =
+                        tokio::sync::mpsc::channel::<String>(6);
+                    let _app_clone = app.clone();
+                    let config_clone = config.clone();
+                    let _cancel_llm = cancel.clone();
+                    let sentence_tx_clone = sentence_tx.clone();
+
+                    let llm_task = tokio::spawn(async move {
+                        voice::chat_streaming(&config_clone, &msgs, &[], &sentence_tx_clone, 0)
+                            .await
+                            .map_err(|e| format!("Falha no LLM: {}", e))
+                    });
+                    drop(sentence_tx);
+
+                    let tts_semaphore = Arc::new(Semaphore::new(tts_parallel_inference_slots()));
+                    let mut sentence_index: u32 = 0;
+                    let mut full_response = String::new();
+
+                    while let Some(sentence) = sentence_rx.recv().await {
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+                        full_response.push_str(&sentence);
+                        full_response.push(' ');
+                        emit_voice_speaking_bubble(&app, full_response.trim());
+                        let idx = sentence_index;
+                        sentence_index += 1;
+                        let permit = tts_semaphore.clone().acquire_owned().await.unwrap();
+                        let app_c = app.clone();
+                        let cfg_c = config.clone();
+                        let cancel_c = cancel.clone();
+                        tokio::spawn(async move {
+                            let _p = permit;
+                            if cancel_c.is_cancelled() {
+                                return;
+                            }
+                            if let Ok(audio) = voice::synthesize(&cfg_c, &sentence, idx).await {
+                                app_c
+                                    .emit("play_audio_chunk", AudioChunk { index: idx, audio })
+                                    .ok();
+                            }
+                        });
+                    }
+
+                    if cancel.is_cancelled() {
+                        llm_task.abort();
+                        return Err("interrupted".to_string());
+                    }
+                    match llm_task.await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => return Err(e),
+                        Err(_) => return Err("LLM task failed".to_string()),
+                    }
+
+                    app.emit("play_audio_done", sentence_index)
+                        .map_err(|e: tauri::Error| e.to_string())?;
+                    app.state::<AppState>()
+                        .messages
+                        .lock()
+                        .unwrap()
+                        .push(chat_message("assistant", full_response));
+                    {
+                        let s = app.state::<AppState>();
+                        let _ = save_history_internal(&s);
+                    }
+                } else {
+                    // Query simples: VLM respondeu direto → TTS
+                    let cleaned = voice::strip_paralinguistic_brackets(&description);
+                    let tts_text = if cleaned.trim().is_empty() {
+                        "Nao foi possivel descrever a tela.".to_string()
+                    } else {
+                        cleaned
+                    };
+
+                    emit_voice_speaking_bubble(&app, &tts_text);
+
+                    // Chunk long TTS text to avoid Chatterbox timeout
+                    {
+                        let mut chunk_idx: u32 = 0;
+                        let mut remaining: &str = &tts_text;
+                        while !remaining.is_empty() {
+                            let chunk = if let Some(pos) = voice::find_tts_chunk_end(remaining) {
+                                let c = remaining[..pos].trim().to_string();
+                                remaining = &remaining[pos..];
+                                c
+                            } else {
+                                let c = remaining.trim().to_string();
+                                remaining = "";
+                                c
+                            };
+                            if !chunk.is_empty() {
+                                match voice::synthesize(&config, &chunk, chunk_idx).await {
+                                    Ok(audio) => {
+                                        app.emit("play_audio_chunk", AudioChunk { index: chunk_idx, audio })
+                                            .map_err(|e: tauri::Error| e.to_string())?;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("TTS fast-path vision chunk {} failed: {}", chunk_idx, e);
+                                    }
+                                }
+                                chunk_idx += 1;
+                            }
+                        }
+                        app.emit("play_audio_done", chunk_idx)
+                            .map_err(|e: tauri::Error| e.to_string())?;
+                    }
+
+                    app.state::<AppState>()
+                        .messages
+                        .lock()
+                        .unwrap()
+                        .push(chat_message("assistant", tts_text));
+                    {
+                        let s = app.state::<AppState>();
+                        let _ = save_history_internal(&s);
+                    }
+                }
+
+                let fast_elapsed = fast_start.elapsed().as_millis();
+                eprintln!(
+                    "[perf] fast_path_vision_done | elapsed_ms={} | tool={} | complex={}",
+                    fast_elapsed, tool_name, is_complex
+                );
+                return Ok(());
+            } else {
+                // ── Fast-path comando simples: executar tool + TTS ──
+                app.emit(
+                    "processing",
+                    ProcessingState {
+                        stage: "executing".to_string(),
+                        text: format!("Executando: {}", tool_name),
+                    },
+                )
+                .map_err(|e: tauri::Error| e.to_string())?;
+
+                let tts_text = if action.needs_llm_formatting {
+                    // Executar tool e usar resultado bruto no TTS
+                    let tool_call = voice::ToolCall {
+                        id: "fp_0".to_string(),
+                        name: tool_name.clone(),
+                        arguments: {
+                            let mut m = std::collections::HashMap::new();
+                            if let Some(obj) = action.tool_args.as_object() {
+                                for (k, v) in obj {
+                                    if v.is_string() || v.is_boolean() || v.is_number() {
+                                        m.insert(k.clone(), v.clone());
+                                    }
+                                }
+                            }
+                            m
+                        },
+                    };
+                    let result = execute_tool(&app, &config, &tool_call, true).await;
+                    let spoken = if result.starts_with("Não foi possível")
+                        || result.starts_with("Faltou")
+                        || result.starts_with("Erro")
+                        || result.starts_with("Não encontrei")
+                    {
+                        result.clone()
+                    } else {
+                        action
+                            .tts_template
+                            .replace("{result}", &result)
+                            .replace("{apps}", &result)
+                            .replace("{status}", &result)
+                            .replace("{time}", &result)
+                            .replace("{date}", &result)
+                            .replace("{state}", &result)
+                    };
+                    spoken
+                } else {
+                    // Template fixo
+                    // Executar tool primeiro (pode ter side-effects como abrir app)
+                    let tool_call = voice::ToolCall {
+                        id: "fp_0".to_string(),
+                        name: tool_name.clone(),
+                        arguments: {
+                            let mut m = std::collections::HashMap::new();
+                            if let Some(obj) = action.tool_args.as_object() {
+                                for (k, v) in obj {
+                                    if v.is_string() || v.is_boolean() || v.is_number() {
+                                        m.insert(k.clone(), v.clone());
+                                    }
+                                }
+                            }
+                            m
+                        },
+                    };
+                    let _result = execute_tool(&app, &config, &tool_call, true).await;
+                    action.tts_template.clone()
+                };
+
+                let cleaned = voice::strip_paralinguistic_brackets(&tts_text);
+                emit_voice_speaking_bubble(&app, &cleaned);
+                // Chunk long TTS text to avoid Chatterbox timeout
+                {
+                    let mut chunk_idx: u32 = 0;
+                    let mut remaining: &str = &cleaned;
+                    while !remaining.is_empty() {
+                        let chunk = if let Some(pos) = voice::find_tts_chunk_end(remaining) {
+                            let c = remaining[..pos].trim().to_string();
+                            remaining = &remaining[pos..];
+                            c
+                        } else {
+                            let c = remaining.trim().to_string();
+                            remaining = "";
+                            c
+                        };
+                        if !chunk.is_empty() {
+                            match voice::synthesize(&config, &chunk, chunk_idx).await {
+                                Ok(audio) => {
+                                    app.emit("play_audio_chunk", AudioChunk { index: chunk_idx, audio })
+                                        .map_err(|e: tauri::Error| e.to_string())?;
+                                }
+                                Err(e) => {
+                                    eprintln!("TTS fast-path chunk {} failed: {}", chunk_idx, e);
+                                }
+                            }
+                            chunk_idx += 1;
+                        }
+                    }
+                    app.emit("play_audio_done", chunk_idx)
+                        .map_err(|e: tauri::Error| e.to_string())?;
+                }
+
+                app.state::<AppState>()
+                    .messages
+                    .lock()
+                    .unwrap()
+                    .push(chat_message("assistant", &cleaned));
+                {
+                    let s = app.state::<AppState>();
+                    let _ = save_history_internal(&s);
+                }
+
+                let fast_elapsed = fast_start.elapsed().as_millis();
+                eprintln!(
+                    "[perf] fast_path_done | elapsed_ms={} | tool={} | tts=\"{}\"",
+                    fast_elapsed, tool_name,
+                    &cleaned.chars().take(60).collect::<String>()
+                );
+                return Ok(());
+            }
+        }
+        fast_path::FastPathResult::Miss => {
+            eprintln!(
+                "[perf] fast_path_miss | transcript=\"{}\" | elapsed_us={}",
+                transcript,
+                fast_start.elapsed().as_micros()
+            );
+        }
+    }
+
     // Stage 2: LLM with tool calling → streaming TTS
     app.emit(
         "processing",
@@ -981,10 +1635,30 @@ async fn process_pipeline(
     )
     .map_err(|e: tauri::Error| e.to_string())?;
 
-    let all_messages = app.state::<AppState>().messages.lock().unwrap().clone();
-
-    let tools = voice::build_tools(&config.tools);
-    let max_tool_rounds = 5;
+    let all_tools = voice::build_tools(&config.tools);
+    let attach_tools = voice::should_attach_voice_tools(&transcript);
+    // Action commands: avoid carrying prior tool transcripts (~3k+ tokens) into the LLM.
+    let all_messages = if attach_tools {
+        eprintln!(
+            "[voice] tools_context=fresh | transcript=\"{}\"",
+            transcript.chars().take(80).collect::<String>()
+        );
+        vec![chat_message("user", transcript.clone())]
+    } else {
+        app.state::<AppState>().messages.lock().unwrap().clone()
+    };
+    let voice_tools: Vec<serde_json::Value> = if attach_tools {
+        all_tools
+    } else {
+        eprintln!(
+            "[voice] tools=off (resposta direta) | transcript=\"{}\"",
+            transcript.chars().take(100).collect::<String>()
+        );
+        Vec::new()
+    };
+    // Voice: 2 rounds is enough (tool batch → short confirmation). More rounds made the LLM
+    // call play_music_query / open_url repeatedly and restart playback each time.
+    let max_tool_rounds = if voice_tools.is_empty() { 1 } else { 2 };
 
     // Single streaming loop: stream with tools → if model returns tool calls,
     // execute them and stream again. If it returns content, sentences flow to TTS.
@@ -998,20 +1672,21 @@ async fn process_pipeline(
     let cancel_llm = cancel.clone();
 
     let llm_handle = {
-        let tools = tools.clone();
+        let voice_tools = voice_tools.clone();
         let sentence_tx = sentence_tx.clone();
         let app = app_clone.clone();
         let config = config_clone.clone();
 
         tokio::spawn(async move {
             let mut all_msgs = all_messages;
+            let mut executed_voice_tools: HashMap<String, String> = HashMap::new();
 
             for _round in 0..max_tool_rounds {
                 if cancel_llm.is_cancelled() { return Err("interrupted".to_string()); }
 
                 let result = tokio::select! {
                     _ = cancel_llm.cancelled() => { return Err("interrupted".to_string()); }
-                    r = voice::chat_streaming(&config, &all_msgs, &tools, &sentence_tx, _round) => {
+                    r = voice::chat_streaming(&config, &all_msgs, &voice_tools, &sentence_tx, _round) => {
                         r.map_err(|e| format!("Falha no LLM: {}", e))?
                     }
                 };
@@ -1022,6 +1697,8 @@ async fn process_pipeline(
                     }
                     voice::StreamResult::ToolCalls(tool_calls, preamble, xml_parsed) => {
                         if cancel_llm.is_cancelled() { return Err("interrupted".to_string()); }
+
+                        let mut playback_started = false;
 
                         if xml_parsed {
                             // XML-parsed tool calls: model emitted XML as text.
@@ -1043,7 +1720,17 @@ async fn process_pipeline(
                                     },
                                 );
 
-                                let result_text = execute_tool(&app, &config, tool_call).await;
+                                let result_text = execute_voice_tool_deduped(
+                                    &mut executed_voice_tools,
+                                    &app,
+                                    &config,
+                                    tool_call,
+                                    _round,
+                                )
+                                .await;
+                                if voice_playback_tool_succeeded(&tool_call.name, &tool_call.arguments, &result_text) {
+                                    playback_started = true;
+                                }
                                 tool_results.push_str(&format!(
                                     "[Resultado da ferramenta {}]: {}\n",
                                     tool_call.name, result_text
@@ -1084,7 +1771,17 @@ async fn process_pipeline(
                                     },
                                 );
 
-                                let result_text = execute_tool(&app, &config, tool_call).await;
+                                let result_text = execute_voice_tool_deduped(
+                                    &mut executed_voice_tools,
+                                    &app,
+                                    &config,
+                                    tool_call,
+                                    _round,
+                                )
+                                .await;
+                                if voice_playback_tool_succeeded(&tool_call.name, &tool_call.arguments, &result_text) {
+                                    playback_started = true;
+                                }
 
                                 let tool_msg = ChatMessage {
                                     role: "tool".to_string(),
@@ -1097,6 +1794,14 @@ async fn process_pipeline(
                                 all_msgs.push(tool_msg.clone());
                                 app.state::<AppState>().messages.lock().unwrap().push(tool_msg);
                             }
+                        }
+
+                        if playback_started {
+                            eprintln!(
+                                "[voice] tool_round_stop | reason=playback_started | round={}",
+                                _round
+                            );
+                            break;
                         }
 
                         let _ = app.emit(
@@ -1128,8 +1833,8 @@ async fn process_pipeline(
     drop(sentence_tx);
 
     // Process sentences as they arrive from the stream → TTS → audio
-    // Use a semaphore to serialise GPU access (Chatterbox + LLM share 8 GB VRAM).
-    let tts_semaphore = Arc::new(Semaphore::new(1));
+    // Semaphore limits concurrent HTTP TTS calls (GPU: 1; CPU: 2 by default — see tts_parallel_inference_slots).
+    let tts_semaphore = Arc::new(Semaphore::new(tts_parallel_inference_slots()));
 
     while let Some(sentence) = sentence_rx.recv().await {
         if cancel.is_cancelled() { break; }
@@ -1143,14 +1848,7 @@ async fn process_pipeline(
         full_text.push_str(&sentence);
         full_text.push(' ');
 
-        app.emit(
-            "processing",
-            ProcessingState {
-                stage: "speaking".to_string(),
-                text: full_text.trim().to_string(),
-            },
-        )
-        .map_err(|e: tauri::Error| e.to_string())?;
+        emit_voice_speaking_bubble(&app, full_text.trim());
 
         let current_index = sentence_index;
         sentence_index += 1;
@@ -1160,8 +1858,8 @@ async fn process_pipeline(
         let cancel = cancel.clone();
         let sem = tts_semaphore.clone();
 
-        // Acquire the single TTS slot before spawning — this keeps back‑pressure
-        // while still allowing sentence_rx to drain.
+        // Acquire a TTS slot before spawning — back‑pressure + bounded parallelism
+        // (see tts_parallel_inference_slots).
         let permit = tokio::select! {
             _ = cancel.cancelled() => { break; }
             p = sem.acquire_owned() => p.unwrap()
@@ -1247,10 +1945,82 @@ fn json_tool_bool(
     }
 }
 
+fn voice_tool_dedup_key(tool_call: &voice::ToolCall) -> String {
+    let mut pairs: Vec<(String, serde_json::Value)> = tool_call
+        .arguments
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    let args = serde_json::to_string(&pairs).unwrap_or_default();
+    format!("{}:{}", tool_call.name, args)
+}
+
+fn voice_tool_result_failed(result: &str) -> bool {
+    let r = result.trim();
+    r.is_empty()
+        || r.starts_with("Faltou")
+        || r.starts_with("Não foi possível")
+        || r.starts_with("Não encontrei")
+        || r.starts_with("Erro")
+        || r.contains("ferramenta desconhecida")
+}
+
+fn voice_playback_tool_succeeded(
+    name: &str,
+    args: &std::collections::HashMap<String, serde_json::Value>,
+    result: &str,
+) -> bool {
+    if voice_tool_result_failed(result) {
+        return false;
+    }
+    match name {
+        "play_music_query" | "play_local_music_playlist" => true,
+        "open_url" => {
+            result.contains("YouTube")
+                || result.contains("youtube")
+                || result.contains("Tocando")
+                || result.contains("Abri o")
+                || result.contains("Abri ")
+        }
+        "control_media_playback" => args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .map(|a| a.eq_ignore_ascii_case("play"))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+async fn execute_voice_tool_deduped(
+    executed: &mut HashMap<String, String>,
+    app: &tauri::AppHandle,
+    config: &VoiceConfig,
+    tool_call: &voice::ToolCall,
+    round: usize,
+) -> String {
+    let key = voice_tool_dedup_key(tool_call);
+    if let Some(cached) = executed.get(&key) {
+        eprintln!(
+            "[voice] tool_dedup_skip | round={} | name={}",
+            round, tool_call.name
+        );
+        return cached.clone();
+    }
+    eprintln!(
+        "[voice] tool_exec | round={} | name={}",
+        round, tool_call.name
+    );
+    let result = execute_tool(app, config, tool_call, true).await;
+    executed.insert(key, result.clone());
+    result
+}
+
 async fn execute_tool(
     app: &tauri::AppHandle,
     config: &VoiceConfig,
     tool_call: &voice::ToolCall,
+    voice_compact: bool,
 ) -> String {
     let rag_store = &app.state::<AppState>().rag_store;
     let music_paths_opt = {
@@ -1299,16 +2069,32 @@ async fn execute_tool(
                 text: "Olhando sua tela...".to_string(),
             });
 
-            match tools::take_screenshot(monitor) {
+            match tools::take_screenshot_region(monitor, None, None, None, None, Some(&question)) {
                 Ok(image_b64) => {
+                    // Garantir que o servidor de visão está rodando (modo on-demand)
+                    if let Err(e) = ensure_vision_server(app).await {
+                        return format!("Erro ao iniciar servidor de visão: {}", e);
+                    }
+                    let vision_url = if config.vision_url.is_empty() {
+                        &config.llm_url
+                    } else {
+                        &config.vision_url
+                    };
                     let vision_model = if config.vision_model.is_empty() {
-                        &config.llm_model
+                        "qwen2.5-vl-3b-instruct"
                     } else {
                         &config.vision_model
                     };
-                    match tools::describe_screenshot(&config.llm_url, vision_model, &image_b64, &question).await {
-                        Ok(desc) => desc,
-                        Err(e) => format!("Captura feita, mas o modelo de visão falhou: {}. Confirme se o modelo aceita imagens (multimodal).", e),
+                    let vision_intent = tools::classify_vision_intent(&question);
+                    let max_tokens = tools::max_tokens_for_intent(vision_intent);
+                    match tools::describe_screenshot(vision_url, vision_model, &image_b64, &question, max_tokens).await {
+                        Ok(desc) => {
+                            // Atualizar timestamp de uso do servidor de visão
+                            *app.state::<AppState>().vision_last_used.lock().unwrap() =
+                                std::time::Instant::now();
+                            desc
+                        }
+                        Err(e) => format!("Captura feita, mas o modelo de visão falhou: {}. Confirme se o servidor de visão está rodando e o modelo aceita imagens (multimodal).", e),
                     }
                 }
                 Err(e) => format!("Falha ao capturar a tela: {}", e),
@@ -1321,19 +2107,113 @@ async fn execute_tool(
         "open_url" => {
             let url = tool_call.arguments.get("url")
                 .and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if url.is_empty() { "Nenhuma URL informada.".to_string() }
-            else { match tools::open_url(&url) { Ok(msg) => msg, Err(e) => format!("Falha ao abrir URL: {}", e) } }
+            if url.is_empty() {
+                "Nenhuma URL informada.".to_string()
+            } else if let Some(search_q) = tools::youtube_search_query_from_open_url(&url) {
+                eprintln!(
+                    "[voice] open_url_redirect | youtube_search -> play_music_query | q=\"{}\"",
+                    search_q.chars().take(80).collect::<String>()
+                );
+                let _ = app.emit(
+                    "processing",
+                    ProcessingState {
+                        stage: "thinking".to_string(),
+                        text: format!("Procurando no YouTube: {}", search_q),
+                    },
+                );
+                match tools::play_music_query(&search_q, None, music_paths_opt, true, false).await {
+                    Ok(msg) => msg,
+                    Err(e) => format!("Não foi possível abrir a música: {}", e),
+                }
+            } else {
+                match tools::open_url(&url) {
+                    Ok(msg) => msg,
+                    Err(e) => format!("Falha ao abrir URL: {}", e),
+                }
+            }
         }
         "get_current_time" => tools::get_current_time(),
         "list_running_apps" => match tools::list_running_apps() {
             Ok(apps) => format!("Aplicativos em execução no momento:\n{}", apps),
             Err(e) => format!("Falha ao listar aplicativos: {}", e),
         },
+        "fetch_fx_quote" => {
+            let pair = tool_call
+                .arguments
+                .get("pair")
+                .and_then(|v| v.as_str())
+                .unwrap_or("USD-BRL");
+            if voice_compact {
+                match tools::fetch_fx_quote_voice(pair).await {
+                    Ok(msg) => msg,
+                    Err(e) => format!("Não foi possível obter cotação: {}", e),
+                }
+            } else {
+                match tools::fetch_fx_quote(pair).await {
+                    Ok(msg) => msg,
+                    Err(e) => format!("Não foi possível obter cotação: {}", e),
+                }
+            }
+        }
+        "fetch_weather" => {
+            let location = tool_call
+                .arguments
+                .get("location")
+                .and_then(|v| v.as_str());
+            let day_offset = tool_call
+                .arguments
+                .get("day_offset")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize);
+            if voice_compact {
+                match tools::fetch_weather_voice(location, day_offset).await {
+                    Ok(msg) => msg,
+                    Err(e) => format!("Não foi possível obter o clima: {}", e),
+                }
+            } else {
+                match tools::fetch_weather(location, day_offset).await {
+                    Ok(msg) => msg,
+                    Err(e) => format!("Não foi possível obter o clima: {}", e),
+                }
+            }
+        }
         "web_fetch" => {
             let url = tool_call.arguments.get("url")
                 .and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if url.is_empty() { "Nenhuma URL informada.".to_string() }
-            else { match tools::web_fetch(&url).await { Ok(text) => text, Err(e) => format!("Falha ao buscar {}: {}", url, e) } }
+            if url.is_empty() {
+                "Nenhuma URL informada.".to_string()
+            } else {
+                let lower = url.to_lowercase();
+                if lower.contains("dolar")
+                    || lower.contains("dólar")
+                    || lower.contains("usd-brl")
+                    || lower.contains("iene")
+                    || lower.contains("yen")
+                    || lower.contains("jpy")
+                    || lower.contains("euro")
+                    || lower.contains("eur-brl")
+                    || lower.contains("cotacao")
+                    || lower.contains("cotação")
+                {
+                    let pair = if lower.contains("iene") || lower.contains("yen") || lower.contains("jpy") {
+                        "JPY-BRL"
+                    } else if lower.contains("euro") || lower.contains("eur") {
+                        "EUR-BRL"
+                    } else {
+                        "USD-BRL"
+                    };
+                    eprintln!("[voice] web_fetch_redirect | fx_quote | url=\"{}\"", url);
+                    match tools::fetch_fx_quote(pair).await {
+                        Ok(msg) => msg,
+                        Err(e) => format!("Não foi possível obter cotação: {}", e),
+                    }
+                } else {
+                    match tools::web_fetch(&url).await {
+                        Ok(text) => text,
+                        Err(e) => format!("Falha ao buscar {}: {}", url, e),
+                    }
+                }
+            }
         }
         "run_command" => {
             let command = tool_call.arguments.get("command")
@@ -1463,6 +2343,16 @@ async fn execute_tool(
                 .and_then(|v| v.as_str())
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
+            let prefer_youtube = tool_call
+                .arguments
+                .get("prefer_youtube")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let prefer_native_player = tool_call
+                .arguments
+                .get("prefer_native_player")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if query.is_empty() {
                 "Faltou query com o título da música.".to_string()
             } else {
@@ -1474,7 +2364,15 @@ async fn execute_tool(
                     },
                 );
                 let artist_ref = artist.as_deref();
-                match tools::play_music_query(&query, artist_ref, music_paths_opt).await {
+                match tools::play_music_query(
+                    &query,
+                    artist_ref,
+                    music_paths_opt,
+                    prefer_youtube,
+                    prefer_native_player,
+                )
+                .await
+                {
                     Ok(msg) => msg,
                     Err(e) => format!("Não foi possível abrir a música: {}", e),
                 }
@@ -1613,9 +2511,14 @@ fn register_global_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
                     let config = state.config.lock().unwrap();
                     let tts_mode = std::env::var("DEXTER_TTS_MODE")
                         .unwrap_or_else(|_| "chatterbox".to_string());
+                    let tts_slots = tts_parallel_inference_slots();
                     eprintln!(
-                        "[perf] pipeline_start | tts_mode={} | llm_model={}",
-                        tts_mode, config.llm_model
+                        "[perf] pipeline_start | tts_mode={} | tts_parallel_slots={} | tts_max_chars={} | tts_split_comma={} | llm_model={}",
+                        tts_mode,
+                        tts_slots,
+                        voice::tts_max_chunk_chars(),
+                        voice::tts_split_on_commas(),
+                        config.llm_model
                     );
                 }
 
@@ -1645,8 +2548,25 @@ fn register_global_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
                     }
 
                     tauri::async_runtime::spawn(async move {
-                        if let Err(e) =
-                            process_pipeline(app_clone.clone(), samples, sample_rate, config, cancel_token).await
+                        let _ = app_clone.emit("processing", ProcessingState {
+                            stage: "processing".to_string(),
+                            text: "Preparando modo voz (Llama + XTTS)...".to_string(),
+                        });
+                        if let Err(e) = ensure_voice_stack_ready(&app_clone).await {
+                            let _ = app_clone.emit("processing", ProcessingState {
+                                stage: "error".to_string(),
+                                text: e,
+                            });
+                            return;
+                        }
+                        if let Err(e) = process_pipeline(
+                            app_clone.clone(),
+                            samples,
+                            sample_rate,
+                            config,
+                            cancel_token,
+                        )
+                        .await
                         {
                             if e != "interrupted" {
                                 eprintln!("Pipeline error: {}", e);
@@ -1727,6 +2647,18 @@ pub fn run() {
             recording_sample_rate: Mutex::new(44100),
             is_recording: Mutex::new(false),
             pipeline_cancel: Mutex::new(CancellationToken::new()),
+            vision_server_child: Mutex::new(None),
+            vision_last_used: Mutex::new(std::time::Instant::now()),
+            voice_llm_child:    Mutex::new(None),
+            text_llm_child:     Mutex::new(None),
+            xtts_server_child:  Mutex::new(None),
+            llm_mode:           Mutex::new(LlmRuntimeMode::VoiceReady),
+            llm_swap_lock:      tokio::sync::Mutex::new(()),
+            is_chat_streaming:  std::sync::atomic::AtomicBool::new(false),
+            warm_kill_handle:   Mutex::new(None),
+            warm_kill_token:    std::sync::atomic::AtomicU64::new(0),
+            warm_ttl_secs:      300,
+            warm_last_used:     Mutex::new(None),
         })
         .setup(|app| {
             let ks = app.state::<AppState>().config.lock().unwrap().clone();
@@ -1791,6 +2723,29 @@ pub fn run() {
 
             register_global_hotkeys(app.handle())?;
 
+            // Vision server idle timeout: desliga após 5 min sem uso
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+                    let state = app_handle.state::<AppState>();
+                    let last_used = *state.vision_last_used.lock().unwrap();
+                    let idle_secs = last_used.elapsed().as_secs();
+
+                    if idle_secs > 300 {
+                        // 5 minutos ocioso → desligar
+                        if state.vision_server_child.lock().unwrap().is_some() {
+                            eprintln!(
+                                "[Vision] Desligando servidor apos {}s de inatividade",
+                                idle_secs
+                            );
+                            kill_vision_server(&state);
+                        }
+                    }
+                }
+            });
+
             // Make webview background transparent and hide on launch
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
@@ -1801,6 +2756,7 @@ pub fn run() {
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::Destroyed = event {
                         let state = app_clone.state::<AppState>();
+                        // Salvar historico
                         let messages = state.messages.lock().unwrap().clone();
                         let path = history_path();
                         if let Some(parent) = path.parent() {
@@ -1809,6 +2765,8 @@ pub fn run() {
                         if let Ok(json) = serde_json::to_string_pretty(&messages) {
                             let _ = std::fs::write(&path, json);
                         }
+                        // Encerrar servidor de visão se estiver rodando
+                        kill_vision_server(&state);
                     }
                 });
             }
@@ -1821,6 +2779,7 @@ pub fn run() {
             pause_global_shortcuts,
             resume_global_shortcuts,
             restart_app,
+            log_frontend_perf,
             get_default_config,
             list_models,
             send_chat_message,
