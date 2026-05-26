@@ -143,7 +143,7 @@ fn fast_commands() -> &'static [FastCommand] {
                     "mutar",
                 ],
                 tool_name: "adjust_system_volume",
-                tts_template: "Som {state}",
+                tts_template: "Som alternado",
                 needs_vision: false,
                 param_extractor: |_| {
                     let mut args = HashMap::new();
@@ -448,6 +448,26 @@ fn fast_commands() -> &'static [FastCommand] {
                     Some(args)
                 },
             },
+            FastCommand {
+                intent: "close_notepad",
+                patterns: &[
+                    "fecha o bloco de notas",
+                    "fechar bloco de notas",
+                    "fecha o bloco de nota",
+                    "fechar bloco de nota",
+                    "fecha o notepad",
+                    "fechar notepad",
+                    "fechar o bloco de notas",
+                ],
+                tool_name: "close_desktop_app",
+                tts_template: "Fechando o Bloco de Notas",
+                needs_vision: false,
+                param_extractor: |_| {
+                    let mut args = HashMap::new();
+                    args.insert("app".into(), "notepad".into());
+                    Some(args)
+                },
+            },
             // ── Estado do Sistema ──
             FastCommand {
                 intent: "list_apps",
@@ -714,6 +734,172 @@ fn query_has_word(query: &str, word: &str) -> bool {
     padded.contains(&format!(" {word} "))
 }
 
+fn query_mentions_reminder(query: &str) -> bool {
+    query.contains("avisa")
+        || query.contains("avise")
+        || query.contains("avisar")
+        || query.contains("lembra")
+        || query.contains("lembre")
+        || query.contains("lembrar")
+        || query.contains("alarme")
+        || query.contains("timer")
+        || query.contains("lembrete")
+}
+
+/// "me avisa em 30 segundos" / "lembra em 5 minutos" → segundos até o toast.
+fn parse_reminder_relative_delay(query: &str) -> Option<u64> {
+    if !query_mentions_reminder(query) {
+        return None;
+    }
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"(\d+)\s*(segundos?|seg|s|minutos?|min|m|horas?|hora|h)\b").unwrap()
+    });
+    let caps = re.captures(query)?;
+    let n: u64 = caps[1].parse().ok()?;
+    let unit = caps.get(2)?.as_str();
+    if unit.starts_with('s') || unit == "seg" {
+        Some(n)
+    } else if unit.starts_with('m') || unit == "min" {
+        n.checked_mul(60)
+    } else {
+        n.checked_mul(3600)
+    }
+}
+
+/// Texto do lembrete após o trecho de tempo (evita confundir "da que" com "que …").
+fn parse_reminder_message(query: &str) -> String {
+    static RE_DELAY: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re_delay = RE_DELAY.get_or_init(|| {
+        regex::Regex::new(r"\d+\s*(segundos?|seg|s|minutos?|min|m|horas?|hora|h)\b").unwrap()
+    });
+    if let Some(m) = re_delay.find(query) {
+        if let Some(msg) = extract_reminder_message_after(&query[m.end()..]) {
+            return msg;
+        }
+    }
+
+    static RE_COMPACT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    if let Some(m) = RE_COMPACT
+        .get_or_init(|| regex::Regex::new(r"\d{1,2}h\d{2}\b").unwrap())
+        .find(query)
+    {
+        if let Some(msg) = extract_reminder_message_after(&query[m.end()..]) {
+            return msg;
+        }
+    }
+
+    static RE_CLOCK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    if let Some(m) = RE_CLOCK
+        .get_or_init(|| regex::Regex::new(r"(?:as|a)\s+\d{1,2}\s+\d{2}\b").unwrap())
+        .find(query)
+    {
+        if let Some(msg) = extract_reminder_message_after(&query[m.end()..]) {
+            return msg;
+        }
+    }
+
+    "Lembrete".to_string()
+}
+
+fn extract_reminder_message_after(after_time: &str) -> Option<String> {
+    let mut tail = after_time.trim();
+    for period in ["da manha", "da tarde", "da noite", "da madrugada"] {
+        if let Some(rest) = tail.strip_prefix(period) {
+            tail = rest.trim();
+            break;
+        }
+        if let Some(pos) = tail.find(period) {
+            tail = tail[pos + period.len()..].trim();
+            break;
+        }
+    }
+
+    for prefix in ["de ", "para ", "que "] {
+        if let Some(rest) = tail.strip_prefix(prefix) {
+            let msg = clean_reminder_message_text(rest);
+            if is_valid_reminder_message(&msg) {
+                return Some(msg);
+            }
+        }
+    }
+    if let Some(pos) = tail.find(" de ") {
+        let msg = clean_reminder_message_text(tail[pos + 4..].trim());
+        if is_valid_reminder_message(&msg) {
+            return Some(msg);
+        }
+    }
+    None
+}
+
+fn clean_reminder_message_text(s: &str) -> String {
+    static RE_LEAD: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE_LEAD.get_or_init(|| {
+        regex::Regex::new(r"^\d+\s*(segundos?|seg|s|minutos?|min|m|horas?|hora|h)\s*(de\s+)?")
+            .unwrap()
+    });
+    re.replace(s.trim().trim_end_matches('.').trim(), "")
+        .trim()
+        .to_string()
+}
+
+fn is_valid_reminder_message(msg: &str) -> bool {
+    if msg.is_empty() || msg.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    static RE_ONLY_DELAY: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE_ONLY_DELAY
+        .get_or_init(|| regex::Regex::new(r"^\d+\s*(segundos?|minutos?|horas?)").unwrap());
+    !re.is_match(msg)
+}
+
+fn adjust_hour_for_day_period(query: &str, mut hour: u32) -> u32 {
+    if query.contains("tarde") || query.contains("noite") {
+        if hour < 12 {
+            hour += 12;
+        }
+    } else if (query.contains("manha") || query.contains("madrugada")) && hour == 12 {
+        hour = 0;
+    }
+    hour
+}
+
+fn validate_hhmm(hour: u32, minute: u32) -> Option<String> {
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    Some(format!("{hour:02}:{minute:02}"))
+}
+
+/// "me lembra às 18:30" / "a 1h30 da manha" → "HH:MM"
+fn parse_reminder_at_time(query: &str) -> Option<String> {
+    if !query_mentions_reminder(query) {
+        return None;
+    }
+
+    static RE_COMPACT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    if let Some(caps) = RE_COMPACT
+        .get_or_init(|| regex::Regex::new(r"\b(\d{1,2})h(\d{2})\b").unwrap())
+        .captures(query)
+    {
+        let hour = adjust_hour_for_day_period(query, caps[1].parse().ok()?);
+        let minute: u32 = caps[2].parse().ok()?;
+        return validate_hhmm(hour, minute);
+    }
+
+    static RE_CLOCK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    if let Some(caps) = RE_CLOCK
+        .get_or_init(|| regex::Regex::new(r"\b(?:as|a)\s+(\d{1,2})\s+(\d{2})\b").unwrap())
+        .captures(query)
+    {
+        let hour = adjust_hour_for_day_period(query, caps[1].parse().ok()?);
+        let minute: u32 = caps[2].parse().ok()?;
+        return validate_hhmm(hour, minute);
+    }
+
+    None
+}
+
 fn query_mentions_fx_rate(query: &str) -> bool {
     query.contains("pesquis")
         || query.contains("valor")
@@ -978,7 +1164,307 @@ fn match_fast_command_patterns(query: &str) -> Option<FastAction> {
     best.map(|(cmd, _)| build_action(cmd, query))
 }
 
-fn keyword_fast_match(query: &str) -> Option<FastAction> {
+// ─────────────────────────────────────────────────────────────────────────────
+// Tier 1: Calculator fast-path (evalexpr)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Tenta detectar e resolver expressão matemática no transcript sem chamar o LLM.
+fn try_calculator_fast_path(query: &str) -> Option<FastAction> {
+    use std::sync::OnceLock;
+    use regex::Regex;
+
+    static EXPR_RE: OnceLock<Regex> = OnceLock::new();
+    let re = EXPR_RE.get_or_init(|| {
+        // Captura sequências numéricas com operadores aritméticos
+        Regex::new(r"(\d+(?:[.,]\d+)?(?:\s*[\+\-\*\/]\s*\d+(?:[.,]\d+)?)+)").unwrap()
+    });
+
+    // Só acionar se a consulta parecer matemática
+    let triggers = ["quanto é", "quantos é", "quanto da", "calcula", "calculadora",
+                    "quanto fica", "me diz quanto", "qual o resultado de", "resultado de",
+                    "soma", "subtrai", "divide", "multiplica"];
+    let has_trigger = triggers.iter().any(|t| query.contains(t));
+    if !has_trigger && !query.chars().any(|c| c.is_ascii_digit()) {
+        return None;
+    }
+
+    let m = re.find(query)?;
+    let raw = m.as_str();
+    // Normaliza: vírgula → ponto, remove espaços internos
+    let expr = raw.replace(',', ".").replace(' ', "");
+
+    match evalexpr::eval(&expr) {
+        Ok(val) => {
+            let result_str = match &val {
+                evalexpr::Value::Float(f) => {
+                    if f.fract() == 0.0 && f.abs() < 1e15_f64 {
+                        format!("{}", *f as i64)
+                    } else {
+                        // Remove zeros à direita
+                        let s = format!("{:.10}", f);
+                        s.trim_end_matches('0').trim_end_matches('.').to_string()
+                    }
+                }
+                evalexpr::Value::Int(i) => i.to_string(),
+                _ => return None,
+            };
+            let tts = format!("O resultado de {} é {}", raw.trim(), result_str);
+            Some(FastAction {
+                tool_name: "calculator".into(),
+                tool_args: serde_json::json!({
+                    "expression": raw.trim(),
+                    "result": result_str
+                }),
+                tts_template: tts,
+                needs_vision: false,
+                vision_complexity: None,
+                needs_llm_formatting: false,
+            })
+        }
+        Err(_) => None,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tier 1: extração de caminhos de arquivo (preserva extensão no transcript bruto)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Extrai texto após a última ocorrência de `keyword` no transcript bruto (preserva `.txt`, etc.).
+fn extract_path_after_keyword(raw: &str, keyword: &str) -> Option<String> {
+    let lower = raw.to_lowercase();
+    let pos = lower.rfind(keyword)?;
+    let after = &raw[pos + keyword.len()..];
+    let cleaned = after
+        .trim()
+        .trim_end_matches(|c: char| "?.!".contains(c))
+        .trim();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned.to_string())
+    }
+}
+
+/// Extrai o nome/pattern do arquivo a buscar a partir do transcript bruto.
+fn extract_file_search_query(raw_transcript: &str) -> Option<String> {
+    let query = normalize_text(raw_transcript);
+    let prefixes = [
+        // ── "arquivo" (existente) ──
+        "acha o arquivo ",
+        "acha arquivo ",
+        "procura o arquivo ",
+        "procura arquivo ",
+        "cade o arquivo ",
+        "cadê o arquivo ",
+        "onde esta o arquivo ",
+        "onde está o arquivo ",
+        "encontra o arquivo ",
+        "encontra arquivo ",
+        "busca o arquivo ",
+        "busca arquivo ",
+        "achar o arquivo ",
+        "achar arquivo ",
+        "procurar o arquivo ",
+        "procurar arquivo ",
+        // ── "ache" + "arquivo" (novo) ──
+        "ache o arquivo ",
+        "ache arquivo ",
+        // ── "pasta" (novo) ──
+        "acha a pasta ",
+        "acha pasta ",
+        "ache a pasta ",
+        "ache pasta ",
+        "procura a pasta ",
+        "procura pasta ",
+        "cade a pasta ",
+        "cadê a pasta ",
+        "onde esta a pasta ",
+        "onde está a pasta ",
+        "encontra a pasta ",
+        "encontra pasta ",
+        "busca a pasta ",
+        "busca pasta ",
+        "achar a pasta ",
+        "achar pasta ",
+        "procurar a pasta ",
+        "procurar pasta ",
+    ];
+    for prefix in &prefixes {
+        if query.starts_with(prefix) {
+            let keyword = if prefix.contains("pasta") {
+                "pasta"
+            } else {
+                "arquivo"
+            };
+            return extract_path_after_keyword(raw_transcript, keyword);
+        }
+    }
+    None
+}
+
+/// Extrai o caminho para `read_file` (ex.: "Leia o arquivo love.txt").
+fn extract_read_file_path(raw_transcript: &str, normalized: &str) -> Option<String> {
+    const TRIGGERS: &[&str] = &[
+        "leia o arquivo",
+        "ler o arquivo",
+        "le o arquivo",
+        "leia arquivo",
+        "ler arquivo",
+        "le arquivo",
+        "lê o arquivo",
+        "lê arquivo",
+    ];
+    if !TRIGGERS.iter().any(|t| normalized.contains(t)) {
+        return None;
+    }
+    extract_path_after_keyword(raw_transcript, "arquivo")
+}
+
+/// Extrai path + conteúdo para `write_file` a partir do transcript bruto (preserva extensões).
+fn extract_write_file_request(raw: &str, normalized: &str) -> Option<HashMap<String, String>> {
+    let triggers = [
+        "cria o arquivo",
+        "criar o arquivo",
+        "cria arquivo",
+        "criar arquivo",
+        "cria um arquivo",
+        "criar um arquivo",
+        "salva o arquivo",
+        "salvar o arquivo",
+        "salva arquivo",
+        "salvar arquivo",
+        "escreve no arquivo",
+        "escrever no arquivo",
+        "escreve o arquivo",
+        "escrever o arquivo",
+    ];
+    if !triggers.iter().any(|t| normalized.contains(t)) && !normalized.contains("cri o arquivo") {
+        return None;
+    }
+    if normalized.contains("abre o arquivo")
+        || normalized.contains("abrir o arquivo")
+        || normalized.contains("le o arquivo")
+        || normalized.contains("ler o arquivo")
+        || normalized.contains("leia o arquivo")
+        || normalized.contains("acha o arquivo")
+        || normalized.contains("procura o arquivo")
+    {
+        return None;
+    }
+
+    let re = regex::Regex::new(
+        r"(?is)(?:cria(?:r)?|cri\s+o|salva(?:r)?|escreve(?:r)?)\s+(?:o\s+|um\s+)?arquivo\s+(\S+?)\s+com(?:\s+a\s+(?:escrita|frase)|\s+o\s+texto)?\s+(.+?)(?:\s+na\s+(?:[aá]rea\s+de\s+trabalho|desktop|documentos|downloads))?\s*[.?!]*\s*$",
+    )
+    .ok()?;
+    let re_alt = regex::Regex::new(
+        r"(?is)(?:cria(?:r)?|cri\s+o|salva(?:r)?|escreve(?:r)?)\s+(?:o\s+|um\s+)?arquivo\s+(\S+?)\s+na\s+(?:[aá]rea\s+de\s+trabalho|desktop|documentos|downloads)\s+com(?:\s+a\s+(?:escrita|frase)|\s+o\s+texto)?\s+(.+?)\s*[.?!]*\s*$",
+    )
+    .ok()?;
+    let caps = re.captures(raw).or_else(|| re_alt.captures(raw))?;
+
+    let filename = caps.get(1)?.as_str().trim().to_string();
+    let mut content = caps.get(2)?.as_str().trim().to_string();
+    if filename.is_empty() || content.is_empty() {
+        return None;
+    }
+
+    for suffix in [
+        " na área de trabalho",
+        " na area de trabalho",
+        " no desktop",
+        " na desktop",
+        " nos documentos",
+        " na pasta documentos",
+        " nos downloads",
+        " na pasta downloads",
+    ] {
+        if let Some(pos) = content.to_lowercase().rfind(&suffix.to_lowercase()) {
+            content = content[..pos].trim().to_string();
+        }
+    }
+    content = trim_wrapping_quotes(&content);
+
+    let on_desktop = normalized.contains("area de trabalho")
+        || normalized.contains("desktop")
+        || normalized.contains("na mesa");
+    let on_documents = normalized.contains("documentos") || normalized.contains("documents");
+    let on_downloads = normalized.contains("downloads") || normalized.contains("download");
+
+    // Nome simples → resolve_write_path coloca no Desktop real (dirs::desktop_dir).
+    let path = if on_desktop {
+        filename.clone()
+    } else if on_documents {
+        format!("documentos/{}", filename)
+    } else if on_downloads {
+        format!("downloads/{}", filename)
+    } else {
+        filename.clone()
+    };
+
+    let mut args = HashMap::new();
+    args.insert("path".into(), path);
+    args.insert("content".into(), content);
+    args.insert("overwrite".into(), "true".into());
+    Some(args)
+}
+
+fn trim_wrapping_quotes(s: &str) -> String {
+    let mut out = s.trim().to_string();
+    while (out.starts_with('"') && out.ends_with('"'))
+        || (out.starts_with('\'') && out.ends_with('\''))
+        || (out.starts_with('“') && out.ends_with('”'))
+        || (out.starts_with('«') && out.ends_with('»'))
+    {
+        if out.len() < 2 {
+            break;
+        }
+        out = out[1..out.len() - 1].trim().to_string();
+    }
+    out
+}
+
+fn is_translate_intent(query: &str) -> bool {
+    query.contains("traduz")
+        || query.contains("traduza")
+        || query.contains("traducao")
+        || query.contains("traduzir")
+        || query.contains("translate")
+}
+
+fn try_translate_fast_path(query: &str) -> Option<FastAction> {
+    if !is_translate_intent(query) {
+        return None;
+    }
+    let source = if query.contains("copi")
+        || query.contains("clipboard")
+        || query.contains("transferencia")
+    {
+        "clipboard"
+    } else if query.contains("selecion") {
+        "selection"
+    } else {
+        "auto"
+    };
+    let target = crate::system_tools::resolve_translate_target(None, Some(query));
+    Some(FastAction {
+        tool_name: "translate_selection".into(),
+        tool_args: serde_json::json!({
+            "source": source,
+            "target_language": target.code,
+        }),
+        tts_template: "{result}".into(),
+        needs_vision: false,
+        vision_complexity: None,
+        needs_llm_formatting: true,
+    })
+}
+
+fn keyword_fast_match(query: &str, raw_transcript: &str) -> Option<FastAction> {
+    // Tradução tem prioridade sobre "o que copiei" / read_clipboard
+    if let Some(action) = try_translate_fast_path(query) {
+        return Some(action);
+    }
+
     // Cotação cambial (dólar, euro, iene, libra)
     if let Some(pair) = detect_fx_pair(query) {
         if query_mentions_fx_rate(query) {
@@ -991,6 +1477,42 @@ fn keyword_fast_match(query: &str) -> Option<FastAction> {
                 needs_llm_formatting: true,
             });
         }
+    }
+
+    // Lembrete relativo: "me avisa em 30 segundos"
+    if let Some(delay_secs) = parse_reminder_relative_delay(query) {
+        let message = parse_reminder_message(query);
+        let sound = crate::notification_tools::ReminderSound::from_query(query);
+        return Some(FastAction {
+            tool_name: "schedule_notification".into(),
+            tool_args: serde_json::json!({
+                "message": message,
+                "delay_seconds": delay_secs,
+                "sound": sound.as_str()
+            }),
+            tts_template: "{result}".into(),
+            needs_vision: false,
+            vision_complexity: None,
+            needs_llm_formatting: true,
+        });
+    }
+
+    // Lembrete em horário: "me lembra às 18:30" → normalize: "as 18 30"
+    if let Some(datetime) = parse_reminder_at_time(query) {
+        let message = parse_reminder_message(query);
+        let sound = crate::notification_tools::ReminderSound::from_query(query);
+        return Some(FastAction {
+            tool_name: "schedule_notification".into(),
+            tool_args: serde_json::json!({
+                "message": message,
+                "datetime": datetime,
+                "sound": sound.as_str()
+            }),
+            tts_template: "{result}".into(),
+            needs_vision: false,
+            vision_complexity: None,
+            needs_llm_formatting: true,
+        });
     }
 
     // Clima / temperatura (Open-Meteo, sem LLM)
@@ -1314,12 +1836,25 @@ fn keyword_fast_match(query: &str) -> Option<FastAction> {
                 needs_llm_formatting: false,
             });
         }
+        if query.contains("bloco de notas") || query.contains("notepad") || query.contains("bloco de nota") {
+            return Some(FastAction {
+                tool_name: "close_desktop_app".into(),
+                tool_args: serde_json::json!({"app": "notepad"}),
+                tts_template: "Fechando Bloco de Notas".into(),
+                needs_vision: false,
+                vision_complexity: None,
+                needs_llm_formatting: false,
+            });
+        }
     }
 
     // Visao
     if query.contains("tela")
         || query.contains("vendo")
-        || (query.contains("ve") && !query.contains("volume"))
+        || query.contains("o que vê")
+        || query.contains("o que ve")
+        || query.contains("descreva")
+        || query.contains("descreve")
     {
         let question = "Descreva a tela de forma curta e objetiva para resposta por voz. \
                         Liste apenas os elementos principais: aplicativos abertos, textos relevantes, ações possíveis. \
@@ -1389,6 +1924,461 @@ fn keyword_fast_match(query: &str) -> Option<FastAction> {
             needs_vision: false,
             vision_complexity: None,
             needs_llm_formatting: false,
+        });
+    }
+
+    // ── Tier 1: fast-paths de sistema ────────────────────────────────────────
+
+    // Calculadora (resolve antes do LLM, sem round-trip)
+    if let Some(action) = try_calculator_fast_path(query) {
+        return Some(action);
+    }
+
+    // Colar na janela ativa (DEVE vir antes de get_active_window para evitar colisão)
+    if (query.contains("cola") || query.contains("colar") || query.contains("cole"))
+        && (query.contains("janela") || query.contains("ativa"))
+    {
+        // Extrai texto a colar: tenta aspas primeiro, depois entre verbo e "na janela"
+        let text_to_paste: String = {
+            // Tenta texto entre aspas duplas ou simples
+            let quoted = if let Some(start) = query.find('"') {
+                query[start + 1..].find('"').map(|end| query[start + 1..start + 1 + end].to_string())
+            } else if let Some(start) = query.find('\'') {
+                query[start + 1..].find('\'').map(|end| query[start + 1..start + 1 + end].to_string())
+            } else {
+                None
+            };
+            if let Some(q) = quoted {
+                q
+            } else {
+                // Tenta extrair entre o verbo e "na janela"/"na ativa"
+                let mut extracted = String::new();
+                for prefix in &["cole ", "cola ", "colar "] {
+                    if let Some(rest) = query.strip_prefix(prefix) {
+                        for suffix in &[" na janela ativa", " na janela", " na ativa", " no campo", " aqui"] {
+                            if let Some(text) = rest.strip_suffix(suffix) {
+                                extracted = text.trim().to_string();
+                                break;
+                            }
+                        }
+                        if extracted.is_empty() {
+                            extracted = rest.trim().to_string();
+                        }
+                        break;
+                    }
+                }
+                extracted
+            }
+        };
+
+        if !text_to_paste.is_empty() {
+            return Some(FastAction {
+                tool_name: "paste_to_active_window".into(),
+                tool_args: serde_json::json!({"text": text_to_paste}),
+                tts_template: "Colando na janela ativa.".into(),
+                needs_vision: false,
+                vision_complexity: None,
+                needs_llm_formatting: false,
+            });
+        }
+    }
+
+    // Janela ativa (refinado: só pergunta, não ação)
+    if ((query.starts_with("qual") || query.starts_with("que") || query.starts_with("o que"))
+        && query.contains("janela")
+        && (query.contains("ativa") || query.contains("foco") || query.contains("frente") || query.contains("aberta")))
+        || query.contains("qual app")
+        || query.contains("que app")
+        || query.contains("que programa")
+        || query.contains("qual programa")
+    {
+        return Some(FastAction {
+            tool_name: "get_active_window".into(),
+            tool_args: serde_json::json!({}),
+            tts_template: "{result}".into(),
+            needs_vision: false,
+            vision_complexity: None,
+            needs_llm_formatting: true,
+        });
+    }
+
+    // Informações do sistema
+    if query.contains("quanto de ram")
+        || query.contains("memoria livre")
+        || query.contains("memória livre")
+        || query.contains("uso de memoria")
+        || query.contains("uso de memória")
+        || query.contains("bateria")
+        || (query.contains("processador") && (query.contains("modelo") || query.contains("nome") || query.contains("qual")))
+        || (query.contains("disco") && (query.contains("livre") || query.contains("espaco") || query.contains("espaço")))
+        || query.contains("uptime")
+        || query.contains("tempo de atividade")
+        || query.contains("quanto tempo ligado")
+        || (query.contains("info") && query.contains("sistema"))
+        || query.contains("informacoes do sistema")
+        || query.contains("informações do sistema")
+    {
+        return Some(FastAction {
+            tool_name: "system_info".into(),
+            tool_args: serde_json::json!({"concise": true}),
+            tts_template: "{result}".into(),
+            needs_vision: false,
+            vision_complexity: None,
+            needs_llm_formatting: true,
+        });
+    }
+
+    // Arquivos recentes
+    if query.contains("arquivos recentes")
+        || query.contains("o que abri")
+        || query.contains("ultimos arquivos")
+        || query.contains("últimos arquivos")
+        || query.contains("abertos recentemente")
+        || query.contains("usados recentemente")
+    {
+        return Some(FastAction {
+            tool_name: "get_recent_files".into(),
+            tool_args: serde_json::json!({"max": 10}),
+            tts_template: "{result}".into(),
+            needs_vision: false,
+            vision_complexity: None,
+            needs_llm_formatting: true,
+        });
+    }
+
+    // Criar / salvar arquivo de texto (ex.: na área de trabalho)
+    if let Some(args) = extract_write_file_request(raw_transcript, query) {
+        return Some(FastAction {
+            tool_name: "write_file".into(),
+            tool_args: {
+                let mut json_map = serde_json::Map::new();
+                for (k, v) in args {
+                    if k == "overwrite" {
+                        json_map.insert(k, JsonValue::Bool(v == "true"));
+                    } else {
+                        json_map.insert(k, JsonValue::String(v));
+                    }
+                }
+                JsonValue::Object(json_map)
+            },
+            tts_template: "Arquivo criado.".into(),
+            needs_vision: false,
+            vision_complexity: None,
+            needs_llm_formatting: false,
+        });
+    }
+
+    // Ler arquivo de texto
+    if let Some(path) = extract_read_file_path(raw_transcript, query) {
+        return Some(FastAction {
+            tool_name: "read_file".into(),
+            tool_args: serde_json::json!({"path": path}),
+            tts_template: "{result}".into(),
+            needs_vision: false,
+            vision_complexity: None,
+            needs_llm_formatting: true,
+        });
+    }
+
+    // Busca de arquivos
+    if let Some(file_query) = extract_file_search_query(raw_transcript) {
+        return Some(FastAction {
+            tool_name: "search_files".into(),
+            tool_args: serde_json::json!({"query": file_query, "max_results": 10}),
+            tts_template: "{result}".into(),
+            needs_vision: false,
+            vision_complexity: None,
+            needs_llm_formatting: true,
+        });
+    }
+
+    // ── Tier 2: fast-paths (ferramentas sem cobertura anterior) ─────────────
+
+    // Abrir pasta/diretório
+    if let Some(folder_path) = (|| -> Option<String> {
+        let prefixes = [
+            "abre a pasta ",
+            "abrir a pasta ",
+            "abra a pasta ",
+            "abre o diretório ",
+            "abre o diretorio ",
+            "abrir o diretório ",
+            "abrir o diretorio ",
+            "abra o diretório ",
+            "abra o diretorio ",
+            "vai para a pasta ",
+            "vai pra pasta ",
+            "ir para a pasta ",
+        ];
+        for prefix in &prefixes {
+            if query.starts_with(prefix) {
+                let path = query[prefix.len()..].trim().trim_end_matches('?').trim().to_string();
+                if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+        }
+        None
+    })() {
+        return Some(FastAction {
+            tool_name: "open_folder".into(),
+            tool_args: serde_json::json!({"path": folder_path}),
+            tts_template: "Abrindo a pasta.".into(),
+            needs_vision: false,
+            vision_complexity: None,
+            needs_llm_formatting: false,
+        });
+    }
+
+    // Anotar / notas de sessão — adicionar nota
+    if let Some(note_text) = query
+        .strip_prefix("anota ")
+        .or_else(|| query.strip_prefix("anotar "))
+    {
+        let note_text = note_text.trim().to_string();
+        if !note_text.is_empty() {
+            return Some(FastAction {
+                tool_name: "session_notes".into(),
+                tool_args: serde_json::json!({"action": "add", "text": note_text}),
+                tts_template: "Nota salva.".into(),
+                needs_vision: false,
+                vision_complexity: None,
+                needs_llm_formatting: false,
+            });
+        }
+    }
+
+    // Anotar / notas de sessão — listar notas
+    if query.contains("lista as notas") || query.contains("listar as notas")
+        || query.contains("minhas notas") || query.contains("mostra as notas")
+        || query.contains("mostrar as notas") || query.contains("ver as notas")
+    {
+        return Some(FastAction {
+            tool_name: "session_notes".into(),
+            tool_args: serde_json::json!({"action": "list"}),
+            tts_template: "{result}".into(),
+            needs_vision: false,
+            vision_complexity: None,
+            needs_llm_formatting: true,
+        });
+    }
+
+    // Anotar / notas de sessão — limpar notas
+    if query.contains("limpa as notas") || query.contains("limpar as notas")
+        || query.contains("apaga as notas") || query.contains("apagar as notas")
+    {
+        return Some(FastAction {
+            tool_name: "session_notes".into(),
+            tool_args: serde_json::json!({"action": "clear"}),
+            tts_template: "Notas apagadas.".into(),
+            needs_vision: false,
+            vision_complexity: None,
+            needs_llm_formatting: false,
+        });
+    }
+
+    // Pressionar tecla
+    if let Some(key_name) = query
+        .strip_prefix("pressiona ")
+        .or_else(|| query.strip_prefix("pressione "))
+        .or_else(|| query.strip_prefix("aperta "))
+        .or_else(|| query.strip_prefix("aperte "))
+    {
+        let key_name = key_name.trim().to_string();
+        if !key_name.is_empty() {
+            return Some(FastAction {
+                tool_name: "send_keys".into(),
+                tool_args: serde_json::json!({"keys": key_name}),
+                tts_template: "Tecla enviada.".into(),
+                needs_vision: false,
+                vision_complexity: None,
+                needs_llm_formatting: false,
+            });
+        }
+    }
+
+    // Digitar texto
+    if let Some(text) = query
+        .strip_prefix("digita ")
+        .or_else(|| query.strip_prefix("digite "))
+    {
+        let text = text.trim().to_string();
+        if !text.is_empty() {
+            return Some(FastAction {
+                tool_name: "send_keys".into(),
+                tool_args: serde_json::json!({"keys": text}),
+                tts_template: "Texto digitado.".into(),
+                needs_vision: false,
+                vision_complexity: None,
+                needs_llm_formatting: false,
+            });
+        }
+    }
+
+    // Bloquear tela
+    if query.contains("bloqueia a tela") || query.contains("bloqueia tela")
+        || query.contains("trava o pc") || query.contains("travar o pc")
+        || query.contains("bloquear a tela") || query.contains("bloquear tela")
+        || query.contains("bloqueia o pc")
+    {
+        return Some(FastAction {
+            tool_name: "lock_screen".into(),
+            tool_args: serde_json::json!({}),
+            tts_template: "Bloqueando a tela.".into(),
+            needs_vision: false,
+            vision_complexity: None,
+            needs_llm_formatting: false,
+        });
+    }
+
+    // Modo foco / Não perturbe
+    if query.contains("modo foco") || query.contains("não perturbe") || query.contains("nao perturbe")
+        || query.contains("ativa o foco") || query.contains("ativar o foco")
+        || query.contains("desativa o foco") || query.contains("desativar o foco")
+    {
+        return Some(FastAction {
+            tool_name: "toggle_do_not_disturb".into(),
+            tool_args: serde_json::json!({}),
+            tts_template: "Modo foco alternado.".into(),
+            needs_vision: false,
+            vision_complexity: None,
+            needs_llm_formatting: false,
+        });
+    }
+
+    // Ler conteúdo do clipboard (não quando o pedido é traduzir)
+    if !is_translate_intent(query)
+        && (query.contains("o que eu copiei")
+        || query.contains("o que copiei")
+        || query.contains("o que tem no clipboard")
+        || query.contains("o que esta no clipboard")
+        || (query.contains("o que")
+            && (query.contains("clipboard") || query.contains("transferencia")))
+        || ((query.contains("leia") || query.contains("le o") || query.contains("ler o"))
+            && (query.contains("copiei")
+                || query.contains("clipboard")
+                || query.contains("area de transferencia")
+                || query.contains("transferencia")))
+        || query.contains("leia o clipboard")
+        || query.contains("leia a area de transferencia")
+        || query.contains("mostra o clipboard")
+        || query.contains("mostra a area de transferencia"))
+    {
+        return Some(FastAction {
+            tool_name: "read_clipboard".into(),
+            tool_args: serde_json::json!({}),
+            tts_template: "{result}".into(),
+            needs_vision: false,
+            vision_complexity: None,
+            needs_llm_formatting: true,
+        });
+    }
+
+    // Copiar texto para clipboard
+    if let Some(text_raw) = query
+        .strip_prefix("copia ")
+        .or_else(|| query.strip_prefix("copiar "))
+    {
+        let text_raw = text_raw.trim();
+        if !text_raw.is_empty()
+            && !text_raw.starts_with("o arquivo")
+            && !text_raw.starts_with("a pasta")
+            && !text_raw.starts_with("o texto")
+        {
+            let text_to_copy = if (text_raw.starts_with('"') && text_raw.ends_with('"'))
+                || (text_raw.starts_with('\'') && text_raw.ends_with('\''))
+            {
+                text_raw[1..text_raw.len() - 1].to_string()
+            } else {
+                text_raw.to_string()
+            };
+            return Some(FastAction {
+                tool_name: "write_clipboard".into(),
+                tool_args: serde_json::json!({"text": text_to_copy}),
+                tts_template: "Copiado para o clipboard.".into(),
+                needs_vision: false,
+                vision_complexity: None,
+                needs_llm_formatting: false,
+            });
+        }
+    }
+
+    // Arquivos recentes — padrões adicionais
+    if query.contains("qual arquivo abri") || query.contains("quais arquivos abri")
+        || query.contains("o que eu abri") || query.contains("que arquivos eu abri")
+        || query.contains("arquivo mais recente") || query.contains("ultimo arquivo")
+        || query.contains("último arquivo")
+    {
+        return Some(FastAction {
+            tool_name: "get_recent_files".into(),
+            tool_args: serde_json::json!({"max": 10}),
+            tts_template: "{result}".into(),
+            needs_vision: false,
+            vision_complexity: None,
+            needs_llm_formatting: true,
+        });
+    }
+
+    // ── Tier 3: fast-paths ─────────────────────────────────────────────────
+
+    // Informações de rede
+    if query.contains("ip")
+        || query.contains("rede")
+        || query.contains("wifi")
+        || query.contains("wi-fi")
+        || query.contains("gateway")
+        || query.contains("dns")
+        || query.contains("mac")
+        || (query.contains("endereço") && query.contains("rede"))
+    {
+        if query.contains("qual")
+            || query.contains("meu")
+            || query.contains("minha")
+            || query.contains("informa")
+            || query.contains("mostra")
+            || query.contains("configura")
+        {
+            return Some(FastAction {
+                tool_name: "get_network_info".into(),
+                tool_args: serde_json::json!({}),
+                tts_template: "{result}".into(),
+                needs_vision: false,
+                vision_complexity: None,
+                needs_llm_formatting: true,
+            });
+        }
+    }
+
+    // ── Tier 4: disk_cleanup fast-path ──────────────────────────────────────
+    if query.contains("limpa") || query.contains("limpar") || query.contains("limpeza")
+        || query.contains("esvazia") || query.contains("esvaziar")
+    {
+        if query.contains("disco") || query.contains("temporário") || query.contains("temporario")
+            || query.contains("temp") || query.contains("lixeira") || query.contains("cache")
+            || query.contains("sistema")
+        {
+            return Some(FastAction {
+                tool_name: "disk_cleanup".into(),
+                tool_args: serde_json::json!({"action": "clean"}),
+                tts_template: "{result}".into(),
+                needs_vision: false,
+                vision_complexity: None,
+                needs_llm_formatting: true,
+            });
+        }
+    }
+    if (query.contains("quanto") || query.contains("qual"))
+        && (query.contains("espaço") || query.contains("espaco") || query.contains("disco"))
+        && (query.contains("livre") || query.contains("tem") || query.contains("disponível")
+            || query.contains("disponivel"))
+    {
+        return Some(FastAction {
+            tool_name: "disk_cleanup".into(),
+            tool_args: serde_json::json!({"action": "analyze"}),
+            tts_template: "{result}".into(),
+            needs_vision: false,
+            vision_complexity: None,
+            needs_llm_formatting: true,
         });
     }
 
@@ -1611,7 +2601,7 @@ pub async fn fast_path_match(
 
     // Step 1: Keyword matching (sub-ms, offline)
     let kw_start = std::time::Instant::now();
-    if let Some(action) = keyword_fast_match(&query) {
+    if let Some(action) = keyword_fast_match(&query, transcript) {
         let elapsed_us = kw_start.elapsed().as_micros();
         eprintln!(
             "[perf] fast_path_keyword_hit | intent={} | transcript=\"{}\" | elapsed_us={}",
@@ -1670,4 +2660,101 @@ pub async fn init_fast_path(embed_url: &str) -> Result<(), String> {
 
     eprintln!("[fast_path] init concluido (keyword path usa 0 HTTP, embedding path on-demand)");
     Ok(())
+}
+
+#[cfg(test)]
+mod file_path_extraction_tests {
+    use super::*;
+
+    #[test]
+    fn search_query_preserves_file_extension() {
+        let raw = "Ache o arquivo love.txt";
+        let q = extract_file_search_query(raw).expect("should extract");
+        assert_eq!(q, "love.txt");
+    }
+
+    #[test]
+    fn read_path_preserves_file_extension() {
+        let raw = "Leia o arquivo love.txt";
+        let norm = normalize_text(raw);
+        let path = extract_read_file_path(raw, &norm).expect("should extract");
+        assert_eq!(path, "love.txt");
+    }
+
+    #[test]
+    fn read_path_rejects_search_phrase() {
+        let raw = "Ache o arquivo love.txt";
+        let norm = normalize_text(raw);
+        assert!(extract_read_file_path(raw, &norm).is_none());
+    }
+}
+
+#[cfg(test)]
+mod translate_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn traduza_o_que_copiei_hits_translate_not_clipboard() {
+        let raw = "Traduza o que copiei.";
+        let query = normalize_text(raw);
+        let action = keyword_fast_match(&query, raw).expect("should match");
+        assert_eq!(action.tool_name, "translate_selection");
+        assert_eq!(
+            action.tool_args.get("source").and_then(|v| v.as_str()),
+            Some("clipboard")
+        );
+        assert_eq!(
+            action.tool_args.get("target_language").and_then(|v| v.as_str()),
+            Some("pt-BR")
+        );
+    }
+
+    #[test]
+    fn traduza_para_japones_sets_target_language() {
+        let raw = "Traduza o que copiei para o japones.";
+        let query = normalize_text(raw);
+        let action = keyword_fast_match(&query, raw).expect("should match");
+        assert_eq!(
+            action.tool_args.get("target_language").and_then(|v| v.as_str()),
+            Some("ja")
+        );
+    }
+
+    #[test]
+    fn o_que_copiei_without_traduz_hits_clipboard() {
+        let raw = "O que eu copiei?";
+        let query = normalize_text(raw);
+        let action = keyword_fast_match(&query, raw).expect("should match");
+        assert_eq!(action.tool_name, "read_clipboard");
+    }
+}
+
+#[cfg(test)]
+mod write_file_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn extract_write_file_desktop_pt() {
+        let raw = r#"Cria o arquivo oi.txt com a escrita "Olá mundo" na área de trabalho."#;
+        let norm = normalize_text(raw);
+        let args = extract_write_file_request(raw, &norm).expect("should parse");
+        assert_eq!(args.get("path").map(String::as_str), Some("oi.txt"));
+        assert_eq!(args.get("content").map(String::as_str), Some("Olá mundo"));
+    }
+
+    #[test]
+    fn extract_write_file_rejects_open_file() {
+        let raw = "Abre o arquivo oi.txt";
+        let norm = normalize_text(raw);
+        assert!(extract_write_file_request(raw, &norm).is_none());
+    }
+
+    #[test]
+    fn extract_write_file_location_before_content() {
+        let raw = "Cria o arquivo oi.txt na área de trabalho com a escrita Olá Mundo.";
+        let norm = normalize_text(raw);
+        let args = extract_write_file_request(raw, &norm).expect("should parse");
+        assert_eq!(args.get("path").map(String::as_str), Some("oi.txt"));
+        assert_eq!(args.get("content").map(String::as_str), Some("Olá Mundo"));
+    }
 }

@@ -238,7 +238,7 @@ switch ($Profile) {
         $TTS_MODE = "xtts"
         $script:UseXtts = $true
         $env:DEXTER_TTS_SPLIT_COMMA = "0"
-        $env:DEXTER_TTS_MAX_CHUNK_CHARS = "260"
+        $env:DEXTER_TTS_MAX_CHUNK_CHARS = "180"
     }
     "voice-xtts-cuda-partial" {
         # XTTS CUDA + Llama parcial na GPU (partilha VRAM; referencia PLANO-VOZ / LLM on-demand).
@@ -252,7 +252,7 @@ switch ($Profile) {
         $TTS_MODE = "xtts"
         $script:UseXtts = $true
         $env:DEXTER_TTS_SPLIT_COMMA = "0"
-        $env:DEXTER_TTS_MAX_CHUNK_CHARS = "260"
+        $env:DEXTER_TTS_MAX_CHUNK_CHARS = "180"
     }
     "voice-xtts" {
         # Alias de voice-xtts-cuda-partial.
@@ -266,7 +266,7 @@ switch ($Profile) {
         $TTS_MODE = "xtts"
         $script:UseXtts = $true
         $env:DEXTER_TTS_SPLIT_COMMA = "0"
-        $env:DEXTER_TTS_MAX_CHUNK_CHARS = "260"
+        $env:DEXTER_TTS_MAX_CHUNK_CHARS = "180"
     }
     "voice-xtts-cpu" {
         # XTTS v2 em CPU: LLM recebe GPU completa.
@@ -282,7 +282,7 @@ switch ($Profile) {
         $script:UseXtts = $true
         # XTTS serializa inferencia (lock): menos chunks = menos gaps entre frases.
         $env:DEXTER_TTS_SPLIT_COMMA = "0"
-        $env:DEXTER_TTS_MAX_CHUNK_CHARS = "260"
+        $env:DEXTER_TTS_MAX_CHUNK_CHARS = "180"
     }
     "voice-xtts-safe" {
         # RTX 8 GB / sistema trava: XTTS em CPU + LLM com GPU max + sem mlock/no-mmap + contexto 4096.
@@ -296,7 +296,7 @@ switch ($Profile) {
         $TTS_MODE = "xtts"
         $script:UseXtts = $true
         $env:DEXTER_TTS_SPLIT_COMMA = "0"
-        $env:DEXTER_TTS_MAX_CHUNK_CHARS = "260"
+        $env:DEXTER_TTS_MAX_CHUNK_CHARS = "180"
     }
 }
 

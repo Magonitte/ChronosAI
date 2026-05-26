@@ -399,3 +399,193 @@ pub fn control_playback(_action: &str) -> Result<String, String> {
 pub fn adjust_volume(_action: &str, _steps: u32) -> Result<String, String> {
     Err("Ajuste de volume só é suportado no Windows.".into())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tier 2 — Audio device management
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn run_ps_media(script: &str) -> Result<String, String> {
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script])
+        .output()
+        .map_err(|e| format!("PowerShell: {}", e))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+/// Lista dispositivos de áudio disponíveis via WMI.
+pub fn list_audio_devices() -> Result<String, String> {
+    let script = r#"
+Get-WmiObject Win32_SoundDevice |
+    Where-Object { $_.Status -eq 'OK' } |
+    Select-Object -ExpandProperty Name
+"#;
+    let out = run_ps_media(script)?;
+    if out.trim().is_empty() {
+        Ok("Nenhum dispositivo de áudio encontrado.".into())
+    } else {
+        Ok(format!("Dispositivos de áudio disponíveis:\n{}", out.trim()))
+    }
+}
+
+/// Troca o dispositivo de áudio padrão pelo nome (requer módulo AudioDeviceCmdlets).
+pub fn switch_audio_device(device_name: &str) -> Result<String, String> {
+    if device_name.trim().is_empty() {
+        return Err("Nome do dispositivo não informado.".into());
+    }
+    let escaped = device_name.replace('\'', "''");
+    let script = format!(
+        r#"
+if (-not (Get-Module -ListAvailable -Name AudioDeviceCmdlets)) {{
+    "INSTALAR_MODULO: Execute no PowerShell: Install-Module AudioDeviceCmdlets -Scope CurrentUser -Force"
+}} else {{
+    Import-Module AudioDeviceCmdlets
+    $dev = Get-AudioDevice -List | Where-Object {{ $_.Name -like '*{}*' -and $_.Type -eq 'Playback' }} | Select-Object -First 1
+    if ($null -eq $dev) {{
+        "Dispositivo nao encontrado: {}"
+    }} else {{
+        Set-AudioDevice -Index $dev.Index | Out-Null
+        "Dispositivo ativo: $($dev.Name)"
+    }}
+}}
+"#,
+        escaped, escaped
+    );
+    run_ps_media(&script)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tier 3 — set_audio_volume_app (IAudioSessionManager2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Ajusta o volume de um aplicativo específico pelo nome.
+pub fn set_audio_volume_app(app_name: &str, volume: u32) -> Result<String, String> {
+    if app_name.trim().is_empty() {
+        return Err("Nome do aplicativo não informado.".into());
+    }
+    let vol = volume.min(100);
+    let escaped = app_name.replace('\'', "''");
+    let script = format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+try {{
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Collections.Generic;
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+public class _MMDeviceEnumerator {{ }}
+public enum EDataFlow {{ eRender = 0, eCapture = 1, eAll = 2 }}
+public enum ERole {{ eConsole = 0, eMultimedia = 1, eCommunications = 2 }}
+[Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDeviceEnumerator {{
+    int EnumAudioEndpoints(EDataFlow dataFlow, uint stateMask, out IntPtr devices);
+    int GetDefaultAudioEndpoint(EDataFlow dataFlow, ERole role, out IntPtr endpoint);
+    int GetDevice(string id, out IntPtr device);
+    int RegisterEndpointNotificationCallback(IntPtr client);
+    int UnregisterEndpointNotificationCallback(IntPtr client);
+}}
+[Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDevice {{
+    int Activate(ref Guid id, int clsCtx, IntPtr activationParams, out IntPtr iface);
+    int OpenPropertyStore(int stgm, out IntPtr propStore);
+    int GetId(out IntPtr idStr);
+    int GetState(out uint state);
+}}
+[Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IAudioSessionManager2 {{
+    int GetAudioSessionControl(IntPtr sessionGuid, uint streamFlags, out IntPtr sessionControl);
+    int GetSimpleAudioVolume(IntPtr sessionGuid, uint streamFlags, out IntPtr simpleVolume);
+    int GetSessionEnumerator(out IntPtr sessionEnum);
+    int RegisterSessionNotification(IntPtr sessionNotification);
+    int UnregisterSessionNotification(IntPtr sessionNotification);
+    int RegisterDuckNotification(string sessionId, IntPtr duckNotification);
+    int UnregisterDuckNotification(IntPtr duckNotification);
+}}
+[Guid("E2F5BB11-0570-40CA-ACDD-3AA01277DEE8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IAudioSessionEnumerator {{
+    int GetCount(out int count);
+    int GetSession(int index, out IntPtr sessionControl);
+}}
+[Guid("F4B1A599-7266-431E-A8CA-E70ACB11E8CD"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IAudioSessionControl {{
+    int GetState(out uint state);
+    int GetDisplayName(out IntPtr displayName);
+    int SetDisplayName(string name, ref Guid eventContext);
+    int GetIconPath(out IntPtr iconPath);
+    int GetGroupingParam(out Guid groupingId, out int idx);
+    int SetGroupingParam(ref Guid groupingId, ref Guid context);
+    int RegisterAudioSessionNotification(IntPtr notification);
+    int UnregisterAudioSessionNotification(IntPtr notification);
+}}
+[Guid("87CE5498-68D6-44E5-9215-6DA47EF883D8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface ISimpleAudioVolume {{
+    int SetMasterVolume(float level, ref Guid context);
+    int GetMasterVolume(out float level);
+    int SetMute(bool mute, ref Guid context);
+    int GetMute(out bool mute);
+}}
+'@ -ErrorAction SilentlyContinue
+
+    $devEnum = New-Object _MMDeviceEnumerator
+    $devEnumPtr = [System.Runtime.InteropServices.Marshal]::GetComInterfaceForObject($devEnum, [IMMDeviceEnumerator])
+    $devEnum2 = [System.Runtime.InteropServices.Marshal]::GetTypedObjectForIUnknown($devEnumPtr, [IMMDeviceEnumerator])
+
+    $endpoint = $null
+    $devEnum2.GetDefaultAudioEndpoint([EDataFlow]::eRender, [ERole]::eConsole, [ref]$endpoint) | Out-Null
+    $endpointPtr = [System.Runtime.InteropServices.Marshal]::GetComInterfaceForObject($endpoint, [IMMDevice])
+
+    $iidAsm2 = [Guid]::New('77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F')
+    $asm2Ptr = [System.IntPtr]::Zero
+    $endpoint.Activate([ref]$iidAsm2, 0, [System.IntPtr]::Zero, [ref]$asm2Ptr) | Out-Null
+    $asm2 = [System.Runtime.InteropServices.Marshal]::GetTypedObjectForIUnknown($asm2Ptr, [IAudioSessionManager2])
+
+    $sessionEnumPtr = [System.IntPtr]::Zero
+    $asm2.GetSessionEnumerator([ref]$sessionEnumPtr) | Out-Null
+    $sessionEnum = [System.Runtime.InteropServices.Marshal]::GetTypedObjectForIUnknown($sessionEnumPtr, [IAudioSessionEnumerator])
+
+    $count = 0
+    $sessionEnum.GetCount([ref]$count) | Out-Null
+    $found = $false
+
+    for ($i = 0; $i -lt $count; $i++) {{
+        $sessionPtr = [System.IntPtr]::Zero
+        $sessionEnum.GetSession($i, [ref]$sessionPtr) | Out-Null
+        $session = [System.Runtime.InteropServices.Marshal]::GetTypedObjectForIUnknown($sessionPtr, [IAudioSessionControl])
+
+        $dispNamePtr = [System.IntPtr]::Zero
+        $session.GetDisplayName([ref]$dispNamePtr) | Out-Null
+        $dispName = [System.Runtime.InteropServices.Marshal]::PtrToStringUni($dispNamePtr)
+        if ([string]::IsNullOrWhiteSpace($dispName)) {{
+            continue
+        }}
+
+        if ($dispName -like '*{escaped}*') {{
+            $iidSsv = [Guid]::New('87CE5498-68D6-44E5-9215-6DA47EF883D8')
+            $ssvPtr = [System.IntPtr]::Zero
+            $asm2.GetSimpleAudioVolume($sessionPtr, 0, [ref]$ssvPtr) | Out-Null
+            $ssv = [System.Runtime.InteropServices.Marshal]::GetTypedObjectForIUnknown($ssvPtr, [ISimpleAudioVolume])
+            $context = [Guid]::NewGuid()
+            $ssv.SetMasterVolume($({vol}f / 100.0), [ref]$context) | Out-Null
+            $found = $true
+            "Volume de '$dispName' ajustado para {vol}%."
+            break
+        }}
+    }}
+
+    if (-not $found) {{
+        "App '{app_name}' não encontrado entre as sessões de áudio."
+    }}
+}} catch {{
+    "Erro ao ajustar volume do app: $_"
+}}
+"#,
+        escaped = escaped,
+        app_name = app_name,
+        vol = vol
+    );
+    run_ps_media(&script)
+}

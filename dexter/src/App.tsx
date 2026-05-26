@@ -72,6 +72,7 @@ interface VoiceConfig {
   shortcut_clear: string;
   shortcut_chat: string;
   shortcut_settings: string;
+  shortcut_stop: string;
   /** Pastas extra para procurar ficheiros de música (local). */
   music_library_paths: string;
   tools: ToolsConfig;
@@ -105,7 +106,13 @@ interface ChatDonePayload {
 
 type SettingsTab = "config" | "tools" | "knowledge";
 
-type ShortcutFieldKey = "shortcut_voice" | "shortcut_hide" | "shortcut_clear" | "shortcut_chat" | "shortcut_settings";
+type ShortcutFieldKey =
+  | "shortcut_voice"
+  | "shortcut_hide"
+  | "shortcut_clear"
+  | "shortcut_chat"
+  | "shortcut_settings"
+  | "shortcut_stop";
 
 const SHORTCUT_FIELD_KEYS: ShortcutFieldKey[] = [
   "shortcut_voice",
@@ -113,6 +120,7 @@ const SHORTCUT_FIELD_KEYS: ShortcutFieldKey[] = [
   "shortcut_clear",
   "shortcut_chat",
   "shortcut_settings",
+  "shortcut_stop",
 ];
 
 function pickShortcuts(c: VoiceConfig): Record<ShortcutFieldKey, string> {
@@ -122,6 +130,7 @@ function pickShortcuts(c: VoiceConfig): Record<ShortcutFieldKey, string> {
     shortcut_clear: c.shortcut_clear ?? "",
     shortcut_chat: c.shortcut_chat ?? "",
     shortcut_settings: c.shortcut_settings ?? "",
+    shortcut_stop: c.shortcut_stop ?? "",
   };
 }
 
@@ -670,6 +679,16 @@ function ConfigTab({
             value={config.shortcut_settings}
             onChange={(v) => setConfig({ ...config, shortcut_settings: v })}
             fieldKey="shortcut_settings"
+            activeField={activeShortcutField}
+            setActiveField={setActiveShortcutField}
+          />
+        </Field>
+        <Field label="Parar voz / leitura">
+          <ShortcutCaptureField
+            label="Parar voz / leitura"
+            value={config.shortcut_stop ?? "Ctrl+5"}
+            onChange={(v) => setConfig({ ...config, shortcut_stop: v })}
+            fieldKey="shortcut_stop"
             activeField={activeShortcutField}
             setActiveField={setActiveShortcutField}
           />
@@ -2131,7 +2150,7 @@ function ChatView() {
           </button>
         </div>
         <p className="chat-shortcuts">
-          {(statusConfig?.shortcut_settings || "Ctrl+Comma")} configurações · {(statusConfig?.shortcut_chat || "Shift+T")} abre o chat · {(statusConfig?.shortcut_voice || "Shift+Z")} para voz · {(statusConfig?.shortcut_clear || "Shift+C")} para limpar · {(statusConfig?.shortcut_hide || "Shift+X")} para esconder
+          {(statusConfig?.shortcut_settings || "Ctrl+Comma")} configurações · {(statusConfig?.shortcut_chat || "Shift+T")} abre o chat · {(statusConfig?.shortcut_voice || "Shift+Z")} para voz · {(statusConfig?.shortcut_stop || "Ctrl+5")} para parar · {(statusConfig?.shortcut_clear || "Shift+C")} para limpar · {(statusConfig?.shortcut_hide || "Shift+X")} para esconder
         </p>
       </div>
     </div>

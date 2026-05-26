@@ -39,7 +39,15 @@ impl RagStore {
                 embedding BLOB NOT NULL,
                 created_at TEXT DEFAULT (datetime('now'))
             );
-            CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);",
+            CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);
+
+            -- Tier 3: snippet library
+            CREATE TABLE IF NOT EXISTS snippets (
+                name TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );",
         )?;
         Ok(Self {
             db: Mutex::new(conn),
@@ -147,6 +155,55 @@ impl RagStore {
     pub fn delete_source(&self, source: &str) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
         let db = self.db.lock().unwrap();
         let deleted = db.execute("DELETE FROM chunks WHERE source = ?1", params![source])?;
+        Ok(deleted)
+    }
+
+    // ── Tier 3: snippet library ────────────────────────────────────────────
+
+    /// Salva ou atualiza um snippet.
+    pub fn save_snippet(&self, name: &str, content: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let db = self.db.lock().unwrap();
+        db.execute(
+            "INSERT INTO snippets (name, content, created_at, updated_at)
+             VALUES (?1, ?2, datetime('now'), datetime('now'))
+             ON CONFLICT(name) DO UPDATE SET content = ?2, updated_at = datetime('now')",
+            params![name, content],
+        )?;
+        Ok(())
+    }
+
+    /// Obtém um snippet pelo nome.
+    pub fn get_snippet(&self, name: &str) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare("SELECT content FROM snippets WHERE name = ?1")?;
+        let result = stmt.query_row(params![name], |row| row.get::<_, String>(0));
+        match result {
+            Ok(content) => Ok(Some(content)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Lista todos os nomes de snippets com data de atualização.
+    pub fn list_snippets(&self) -> Result<Vec<(String, String)>, Box<dyn std::error::Error + Send + Sync>> {
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare("SELECT name, updated_at FROM snippets ORDER BY name")?;
+        let rows = stmt.query_map([], |row| {
+            let name: String = row.get(0)?;
+            let updated: String = row.get(1)?;
+            Ok((name, updated))
+        })?;
+        let mut snippets = Vec::new();
+        for row in rows {
+            snippets.push(row?);
+        }
+        Ok(snippets)
+    }
+
+    /// Remove um snippet pelo nome.
+    pub fn delete_snippet(&self, name: &str) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        let db = self.db.lock().unwrap();
+        let deleted = db.execute("DELETE FROM snippets WHERE name = ?1", params![name])?;
         Ok(deleted)
     }
 }

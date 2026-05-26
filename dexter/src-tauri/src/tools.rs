@@ -363,6 +363,81 @@ pub async fn describe_screenshot(
         .to_string())
 }
 
+/// Resultado de uma completion não-streaming.
+pub struct LlmCompletion {
+    pub content: String,
+    pub finish_reason: Option<String>,
+}
+
+/// Completions de texto (não-streaming) via API OpenAI-compatível do llama-server.
+pub async fn llm_complete(
+    llm_url: &str,
+    model: &str,
+    system_prompt: &str,
+    user_message: &str,
+    max_tokens: u32,
+) -> Result<String, String> {
+    llm_complete_detailed(llm_url, model, system_prompt, user_message, max_tokens)
+        .await
+        .map(|r| r.content)
+}
+
+pub async fn llm_complete_detailed(
+    llm_url: &str,
+    model: &str,
+    system_prompt: &str,
+    user_message: &str,
+    max_tokens: u32,
+) -> Result<LlmCompletion, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": user_message }
+        ],
+        "stream": false,
+        "max_tokens": max_tokens,
+        "temperature": 0.2
+    });
+
+    let resp = client
+        .post(format!("{}/v1/chat/completions", llm_url.trim_end_matches('/')))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Falha na requisição ao LLM: {}", e))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Erro na API do LLM {}: {}", status, text));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Falha ao interpretar resposta do LLM: {}", e))?;
+
+    let content = json["choices"][0]["message"]["content"]
+        .as_str()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Resposta vazia do modelo.".to_string())?;
+    let finish_reason = json["choices"][0]["finish_reason"]
+        .as_str()
+        .map(str::to_string);
+
+    Ok(LlmCompletion {
+        content,
+        finish_reason,
+    })
+}
+
 /// Read the system clipboard text on Windows using PowerShell.
 pub fn read_clipboard() -> Result<String, String> {
     let output = Command::new("powershell")
@@ -1730,6 +1805,32 @@ pub fn get_current_time() -> String {
     )
 }
 
+/// Splits the output of `get_current_time()` into `(time_str, date_str)` usable
+/// for replacing `{time}` and `{date}` in fast-path TTS templates.
+///
+/// `get_current_time()` returns something like:
+///   "segunda-feira, 26 de maio de 2025 — 18:45:30"
+///
+/// This extracts:
+/// - date: "segunda-feira, 26 de maio de 2025"
+/// - time: "18:45" (drops seconds for cleaner speech)
+pub fn split_datetime_for_templates(full: &str) -> (String, String) {
+    if let Some((date_part, time_part)) = full.split_once(" — ") {
+        let date_str = date_part.trim().to_string();
+        // "18:45:30" → "18:45"
+        let time_clean = time_part
+            .trim()
+            .split(':')
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(":");
+        (time_clean, date_str)
+    } else {
+        // Fallback: if format unexpectedly changes, return full string for both
+        (full.to_string(), full.to_string())
+    }
+}
+
 /// Fetch a URL and return its text content (HTML stripped to readable text).
 pub async fn web_fetch(url: &str) -> Result<String, String> {
     let client = reqwest::Client::builder()
@@ -2335,7 +2436,12 @@ pub fn close_desktop_app(app: &str) -> Result<String, String> {
 
 #[cfg(windows)]
 fn close_desktop_app_windows(app: &str) -> Result<String, String> {
-    let key = app.trim().to_lowercase().replace('-', "_");
+    let mut key = app.trim().to_lowercase().replace('-', "_");
+    if key.contains("bloco") && key.contains("notas") {
+        key = "notepad".to_string();
+    } else if key.contains("notepad") {
+        key = "notepad".to_string();
+    }
 
     let (label, exe_names): (&str, &[&str]) = match key.as_str() {
         "cursor" => ("Cursor", &["Cursor.exe"]),
@@ -2352,6 +2458,9 @@ fn close_desktop_app_windows(app: &str) -> Result<String, String> {
             ],
         ),
         "chrome" | "google_chrome" => ("Google Chrome", &["chrome.exe"]),
+        "notepad" | "bloco_de_notas" | "bloco de notas" => {
+            ("Bloco de Notas", &["notepad.exe"])
+        }
         "edge" | "microsoft_edge" | "msedge" => ("Microsoft Edge", &["msedge.exe"]),
         "discord" => (
             "Discord",
@@ -2379,6 +2488,7 @@ fn close_desktop_app_windows(app: &str) -> Result<String, String> {
         "word" => ("Microsoft Word", &["WINWORD.EXE", "winword.exe"]),
         "powerpoint" | "ppt" => ("Microsoft PowerPoint", &["POWERPNT.EXE", "powerpnt.exe"]),
         "outlook" => ("Microsoft Outlook", &["OUTLOOK.EXE", "outlook.exe"]),
+        "paint" | "mspaint" => ("Paint", &["mspaint.exe", "MSPaint.exe"]),
         _ => {
             return Err(format!(
                 "Unknown app {:?}. Same ids as launch_desktop_app.",
@@ -2530,4 +2640,86 @@ if ($stopped) { exit 0 } else { exit 1 }
         .map_err(|e| e.to_string())?;
 
     Ok(out.status.success())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tier 4 — image_generation (Stable Diffusion local)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Gera uma imagem via Stable Diffusion local (Automatic1111 WebUI API por padrão).
+pub async fn image_generation(
+    prompt: &str,
+    negative_prompt: Option<&str>,
+    width: Option<u32>,
+    height: Option<u32>,
+    steps: Option<u32>,
+    sd_url: Option<&str>,
+) -> Result<String, String> {
+    let base_url = sd_url.unwrap_or("http://127.0.0.1:7860");
+    let url = format!("{}/sdapi/v1/txt2img", base_url.trim_end_matches('/'));
+
+    let body = serde_json::json!({
+        "prompt": prompt,
+        "negative_prompt": negative_prompt.unwrap_or(""),
+        "steps": steps.unwrap_or(20),
+        "width": width.unwrap_or(512),
+        "height": height.unwrap_or(512),
+        "cfg_scale": 7.0,
+        "sampler_name": "Euler a",
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(120))
+        .send()
+        .await
+        .map_err(|e| format!("Stable Diffusion não acessível em {}: {}", base_url, e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!(
+            "Stable Diffusion API retornou erro {}: {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        ));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Resposta inválida do SD: {}", e))?;
+
+    let images = json["images"]
+        .as_array()
+        .ok_or("Resposta do SD não contém 'images'.")?;
+
+    if images.is_empty() {
+        return Err("Nenhuma imagem foi gerada.".into());
+    }
+
+    let b64_str = images[0].as_str().ok_or("Formato de imagem inválido.")?;
+
+    let image_bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64_str)
+        .map_err(|e| format!("Falha ao decodificar base64: {}", e))?;
+
+    let out_dir = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("Chronos")
+        .join("generated");
+    std::fs::create_dir_all(&out_dir)
+        .map_err(|e| format!("Falha ao criar diretório de saída: {}", e))?;
+
+    let filename = format!("sd_{}.png", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+    let out_path = out_dir.join(&filename);
+
+    std::fs::write(&out_path, &image_bytes)
+        .map_err(|e| format!("Falha ao salvar imagem: {}", e))?;
+
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", "start", "", &out_path.to_string_lossy()])
+        .spawn();
+
+    Ok(format!("Imagem gerada e salva como {}. Prompt: \"{}\"", out_path.display(), prompt))
 }

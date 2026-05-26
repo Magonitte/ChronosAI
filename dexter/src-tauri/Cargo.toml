@@ -41,6 +41,10 @@ tokio-util = { version = "0.7", features = ["rt"] }
 image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
 futures = "0.3"
 walkdir = "2"
+evalexpr = "11"
+similar = "2"
+strsim = "0.11"
+notify = "7"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

@@ -11,11 +11,15 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
+mod context_modifier;
 mod fast_path;
+mod file_tools;
 mod llm_ondemand;
 mod media_controls;
+mod notification_tools;
 mod rag;
 mod sandbox;
+mod system_tools;
 mod tools;
 mod voice;
 
@@ -66,7 +70,7 @@ fn emit_voice_speaking_bubble(app: &tauri::AppHandle, text: &str) {
 }
 
 #[derive(Clone, Serialize)]
-struct AudioChunk {
+pub(crate) struct AudioChunk {
     index: u32,
     audio: String, // base64 WAV
 }
@@ -151,6 +155,9 @@ pub struct AppState {
     /// Ultima vez que o chat foi usado (enviou mensagem).
     /// Permite TTL adaptativo: se nunca usado → mata Qwen imediatamente.
     pub warm_last_used:    Mutex<Option<std::time::Instant>>,
+    // ── Tier 1: estado adicional ─────────────────────────────────
+    pub clipboard_history: notification_tools::ClipboardHistory,
+    pub session_notes: Mutex<HashMap<u64, String>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -175,6 +182,80 @@ pub struct ToolsConfig {
     pub launch_desktop_app: bool,
     #[serde(default = "default_true")]
     pub media_controls: bool,
+    // ── Tier 1: novas ferramentas ──────────────────────────────────
+    #[serde(default = "default_true")]
+    pub write_clipboard: bool,
+    #[serde(default = "default_true")]
+    pub get_active_window: bool,
+    #[serde(default = "default_true")]
+    pub system_info: bool,
+    #[serde(default = "default_true")]
+    pub schedule_notification: bool,
+    #[serde(default = "default_true")]
+    pub clipboard_history: bool,
+    #[serde(default = "default_true")]
+    pub search_files: bool,
+    #[serde(default = "default_true")]
+    pub get_recent_files: bool,
+    #[serde(default = "default_true")]
+    pub read_file: bool,
+    #[serde(default = "default_true")]
+    pub write_file: bool,
+    // ── Tier 2 ──────────────────────────────────────────────────────────────
+    #[serde(default = "default_true")]
+    pub manage_processes: bool,
+    #[serde(default = "default_true")]
+    pub lock_screen: bool,
+    #[serde(default = "default_true")]
+    pub open_folder: bool,
+    #[serde(default)]
+    pub set_wallpaper: bool,
+    #[serde(default = "default_true")]
+    pub get_open_windows: bool,
+    #[serde(default = "default_true")]
+    pub read_selected_text: bool,
+    #[serde(default = "default_true")]
+    pub translate_selection: bool,
+    #[serde(default = "default_true")]
+    pub paste_to_active_window: bool,
+    #[serde(default = "default_true")]
+    pub toggle_do_not_disturb: bool,
+    #[serde(default = "default_true")]
+    pub session_notes: bool,
+    #[serde(default)]
+    pub diff_clipboard: bool,
+    #[serde(default)]
+    pub ocr_image: bool,
+    #[serde(default)]
+    pub transcribe_audio_file: bool,
+    #[serde(default = "default_true")]
+    pub audio_device_switch: bool,
+    #[serde(default = "default_true")]
+    pub run_powershell_script: bool,
+    // ── Tier 3 ──────────────────────────────────────────────────────────────
+    #[serde(default = "default_true")]
+    pub get_network_info: bool,
+    #[serde(default = "default_true")]
+    pub take_screenshot_region: bool,
+    #[serde(default = "default_true")]
+    pub calendar_events: bool,
+    #[serde(default)]
+    pub send_email: bool,
+    #[serde(default = "default_true")]
+    pub send_keys: bool,
+    #[serde(default)]
+    pub watch_file: bool,
+    #[serde(default)]
+    pub snippet_library: bool,
+    #[serde(default = "default_true")]
+    pub set_audio_volume_app: bool,
+    // ── Tier 4 ──────────────────────────────────────────────────────────────
+    #[serde(default)]
+    pub ui_automation: bool,
+    #[serde(default)]
+    pub image_generation: bool,
+    #[serde(default)]
+    pub disk_cleanup: bool,
 }
 
 fn default_true() -> bool {
@@ -212,6 +293,22 @@ fn default_shortcut_chat() -> String {
 fn default_shortcut_settings() -> String {
     "Ctrl+Comma".to_string()
 }
+fn default_shortcut_stop() -> String {
+    "Ctrl+5".to_string()
+}
+
+/// Cancela pipeline ativo (TTS, LLM, leitura de arquivo) e para o áudio no frontend.
+fn interrupt_active_pipeline(app: &tauri::AppHandle) {
+    {
+        let state = app.state::<AppState>();
+        let mut cancel = state.pipeline_cancel.lock().unwrap();
+        cancel.cancel();
+        *cancel = CancellationToken::new();
+        *state.is_recording.lock().unwrap() = false;
+        state.recorded_samples.lock().unwrap().clear();
+    }
+    let _ = app.emit("pipeline_interrupted", ());
+}
 
 fn resolved_shortcut(user: &str, fallback: &str) -> String {
     let t = user.trim();
@@ -235,6 +332,44 @@ impl Default for ToolsConfig {
             web_fetch: true,
             launch_desktop_app: true,
             media_controls: true,
+            write_clipboard: true,
+            get_active_window: true,
+            system_info: true,
+            schedule_notification: true,
+            clipboard_history: true,
+            search_files: true,
+            get_recent_files: true,
+            read_file: true,
+            write_file: true,
+            // Tier 2
+            manage_processes: true,
+            lock_screen: true,
+            open_folder: true,
+            set_wallpaper: false,
+            get_open_windows: true,
+            read_selected_text: true,
+            translate_selection: true,
+            paste_to_active_window: true,
+            toggle_do_not_disturb: true,
+            session_notes: true,
+            diff_clipboard: false,
+            ocr_image: false,
+            transcribe_audio_file: false,
+            audio_device_switch: true,
+            run_powershell_script: true,
+            // Tier 3
+            get_network_info: true,
+            take_screenshot_region: true,
+            calendar_events: true,
+            send_email: false,
+            send_keys: true,
+            watch_file: false,
+            snippet_library: false,
+            set_audio_volume_app: true,
+            // Tier 4
+            ui_automation: false,
+            image_generation: false,
+            disk_cleanup: false,
         }
     }
 }
@@ -294,6 +429,9 @@ pub struct VoiceConfig {
     pub shortcut_chat: String,
     #[serde(default = "default_shortcut_settings")]
     pub shortcut_settings: String,
+    /// Parar TTS / leitura em voz / pipeline em andamento.
+    #[serde(default = "default_shortcut_stop")]
+    pub shortcut_stop: String,
     /// Pastas extra onde procurar música (uma por linha ou separadas por ; ou |). Junta-se à pasta Música do Windows e a DEXTER_MUSIC_PATHS.
     #[serde(default)]
     pub music_library_paths: String,
@@ -342,6 +480,7 @@ impl Default for VoiceConfig {
             shortcut_clear: "Shift+C".to_string(),
             shortcut_chat: "Shift+T".to_string(),
             shortcut_settings: "Ctrl+Comma".to_string(),
+            shortcut_stop: "Ctrl+5".to_string(),
             music_library_paths: String::new(),
             tools: ToolsConfig::default(),
             sandbox: sandbox::SandboxConfig::default(),
@@ -1035,7 +1174,7 @@ async fn send_chat_message(app: tauri::AppHandle, text: String) -> Result<(), St
     }
 
     let all_messages = app.state::<AppState>().messages.lock().unwrap().clone();
-    let tools = voice::build_tools(&config.tools);
+    let tools = voice::build_tools(&config.tools, &[]);
     let max_tool_rounds = 5;
     let response_started = std::time::Instant::now();
 
@@ -1507,7 +1646,7 @@ async fn process_pipeline(
                 )
                 .map_err(|e: tauri::Error| e.to_string())?;
 
-                let tts_text = if action.needs_llm_formatting {
+                let (tts_text, raw_tool_result) = if action.needs_llm_formatting {
                     // Executar tool e usar resultado bruto no TTS
                     let tool_call = voice::ToolCall {
                         id: "fp_0".to_string(),
@@ -1524,8 +1663,26 @@ async fn process_pipeline(
                             m
                         },
                     };
+                    let file_path_arg = action
+                        .tool_args
+                        .get("path")
+                        .and_then(|v| v.as_str());
                     let result = execute_tool(&app, &config, &tool_call, true).await;
-                    let spoken = if result.starts_with("Não foi possível")
+                    let spoken = if tool_name == "write_file" {
+                        voice::spoken_write_file_result(&tool_name, &result)
+                    } else if tool_name == "read_file" {
+                        voice::spoken_read_file_result(&tool_name, &result, file_path_arg)
+                    } else if tool_name == "search_files" {
+                        voice::spoken_search_files_result(&result)
+                    } else if tool_name == "translate_selection" {
+                        let target_lang = action
+                            .tool_args
+                            .get("target_language")
+                            .and_then(|v| v.as_str());
+                        let target =
+                            system_tools::resolve_translate_target(target_lang, None);
+                        voice::spoken_translate_tts(&result, &target)
+                    } else if result.starts_with("Não foi possível")
                         || result.starts_with("Faltou")
                         || result.starts_with("Erro")
                         || result.starts_with("Não encontrei")
@@ -1541,10 +1698,9 @@ async fn process_pipeline(
                             .replace("{date}", &result)
                             .replace("{state}", &result)
                     };
-                    spoken
+                    (spoken, Some(result))
                 } else {
-                    // Template fixo
-                    // Executar tool primeiro (pode ter side-effects como abrir app)
+                    // Template with optional placeholders (e.g. {time}/{date} for get_current_time)
                     let tool_call = voice::ToolCall {
                         id: "fp_0".to_string(),
                         name: tool_name.clone(),
@@ -1560,48 +1716,67 @@ async fn process_pipeline(
                             m
                         },
                     };
-                    let _result = execute_tool(&app, &config, &tool_call, true).await;
-                    action.tts_template.clone()
+                    let tool_result = execute_tool(&app, &config, &tool_call, true).await;
+                    let spoken = if tool_name == "get_current_time" {
+                        let (time_part, date_part) =
+                            tools::split_datetime_for_templates(&tool_result);
+                        action
+                            .tts_template
+                            .replace("{time}", &time_part)
+                            .replace("{date}", &date_part)
+                    } else if tool_name == "write_file" {
+                        voice::spoken_write_file_result(&tool_name, &tool_result)
+                    } else {
+                        action.tts_template.clone()
+                    };
+                    (spoken, None)
                 };
 
                 let cleaned = voice::strip_paralinguistic_brackets(&tts_text);
-                emit_voice_speaking_bubble(&app, &cleaned);
-                // Chunk long TTS text to avoid Chatterbox timeout
-                {
-                    let mut chunk_idx: u32 = 0;
-                    let mut remaining: &str = &cleaned;
-                    while !remaining.is_empty() {
-                        let chunk = if let Some(pos) = voice::find_tts_chunk_end(remaining) {
-                            let c = remaining[..pos].trim().to_string();
-                            remaining = &remaining[pos..];
-                            c
+                let bubble_text = if tool_name == "translate_selection" {
+                    if let Some(ref result) = raw_tool_result {
+                        if result.starts_with("translate_selection:")
+                            || result.starts_with("Erro")
+                            || result.starts_with("Faltou")
+                            || result.contains("Nenhum texto")
+                        {
+                            cleaned.clone()
                         } else {
-                            let c = remaining.trim().to_string();
-                            remaining = "";
-                            c
-                        };
-                        if !chunk.is_empty() {
-                            match voice::synthesize(&config, &chunk, chunk_idx).await {
-                                Ok(audio) => {
-                                    app.emit("play_audio_chunk", AudioChunk { index: chunk_idx, audio })
-                                        .map_err(|e: tauri::Error| e.to_string())?;
-                                }
-                                Err(e) => {
-                                    eprintln!("TTS fast-path chunk {} failed: {}", chunk_idx, e);
-                                }
-                            }
-                            chunk_idx += 1;
+                            voice::read_aloud_history_preview(&voice::translation_body(result))
                         }
+                    } else {
+                        cleaned.clone()
                     }
-                    app.emit("play_audio_done", chunk_idx)
-                        .map_err(|e: tauri::Error| e.to_string())?;
+                } else if tool_name == "read_file" && !cleaned.starts_with("Não") {
+                    voice::read_aloud_history_preview(&cleaned)
+                } else {
+                    cleaned.clone()
+                };
+                emit_voice_speaking_bubble(&app, &bubble_text);
+                let read_aloud = if tool_name == "read_file" {
+                    true
+                } else if tool_name == "translate_selection" {
+                    let target_lang = action
+                        .tool_args
+                        .get("target_language")
+                        .and_then(|v| v.as_str());
+                    system_tools::resolve_translate_target(target_lang, None)
+                        .voice_reads_translation_aloud()
+                } else {
+                    false
+                };
+                voice::emit_chunked_tts_cancellable(&app, &config, &cancel, &cleaned, read_aloud)
+                    .await?;
+
+                if cancel.is_cancelled() {
+                    return Err("interrupted".to_string());
                 }
 
                 app.state::<AppState>()
                     .messages
                     .lock()
                     .unwrap()
-                    .push(chat_message("assistant", &cleaned));
+                    .push(chat_message("assistant", &bubble_text));
                 {
                     let s = app.state::<AppState>();
                     let _ = save_history_internal(&s);
@@ -1635,9 +1810,35 @@ async fn process_pipeline(
     )
     .map_err(|e: tauri::Error| e.to_string())?;
 
-    let all_tools = voice::build_tools(&config.tools);
+    // ── ContextModifier: inject extra instructions based on transcript + clipboard ──
+    let mut config = config;
+    {
+        let needs_clip = {
+            let t = transcript.to_lowercase();
+            t.contains("erro") || t.contains("error") || t.contains("código")
+                || t.contains("codigo") || t.contains("debug") || t.contains("explica")
+                || t.contains("corrig")
+        };
+        let clipboard_ctx = if needs_clip {
+            tools::read_clipboard().unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let ctx_modifiers = context_modifier::detect_modifiers(&transcript, &clipboard_ctx);
+        for m in &ctx_modifiers {
+            let extra = context_modifier::modifier_to_prompt(m);
+            if !extra.is_empty() {
+                config.system_prompt.push('\n');
+                config.system_prompt.push('\n');
+                config.system_prompt.push_str(extra);
+            }
+        }
+    }
+
+    // ── ToolCategory routing: seleciona tools relevantes para o transcript ────
+    let tool_categories = voice::detect_tool_categories(&transcript);
+    let all_tools = voice::build_tools(&config.tools, &tool_categories);
     let attach_tools = voice::should_attach_voice_tools(&transcript);
-    // Action commands: avoid carrying prior tool transcripts (~3k+ tokens) into the LLM.
     let all_messages = if attach_tools {
         eprintln!(
             "[voice] tools_context=fresh | transcript=\"{}\"",
@@ -1928,6 +2129,19 @@ async fn process_pipeline(
 }
 
 /// Execute a single tool call and return the result text.
+fn json_opt_u64(
+    arguments: &std::collections::HashMap<String, serde_json::Value>,
+    key: &str,
+) -> Option<u64> {
+    match arguments.get(key)? {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .or_else(|| n.as_i64().and_then(|i| u64::try_from(i).ok())),
+        serde_json::Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+}
+
 fn json_tool_bool(
     arguments: &std::collections::HashMap<String, serde_json::Value>,
     key: &str,
@@ -2012,6 +2226,14 @@ async fn execute_voice_tool_deduped(
         round, tool_call.name
     );
     let result = execute_tool(app, config, tool_call, true).await;
+    let preview: String = result.chars().take(160).collect();
+    eprintln!(
+        "[voice] tool_result | round={} | name={} | ok={} | result=\"{}\"",
+        round,
+        tool_call.name,
+        !voice_tool_result_failed(&result),
+        preview
+    );
     executed.insert(key, result.clone());
     result
 }
@@ -2101,7 +2323,15 @@ async fn execute_tool(
             }
         }
         "read_clipboard" => match tools::read_clipboard() {
-            Ok(text) => if text.trim().is_empty() { "A área de transferência está vazia.".to_string() } else { format!("Conteúdo da área de transferência:\n{}", text) },
+            Ok(text) => {
+                if text.trim().is_empty() {
+                    "A área de transferência está vazia.".to_string()
+                } else {
+                    // Registrar no histórico do clipboard
+                    app.state::<AppState>().clipboard_history.push(text.clone());
+                    format!("Conteúdo da área de transferência:\n{}", text)
+                }
+            }
             Err(e) => format!("Falha ao ler a área de transferência: {}", e),
         },
         "open_url" => {
@@ -2435,9 +2665,615 @@ async fn execute_tool(
                 Err(e) => format!("Reprodutor multimédia: {}", e),
             }
         }
+        // ── Tier 1: System Tools ─────────────────────────────────────────────
+        "write_clipboard" => {
+            let text = tool_call.arguments.get("text")
+                .and_then(|v| v.as_str()).unwrap_or("");
+            if text.is_empty() {
+                "Faltou o texto a copiar.".to_string()
+            } else {
+                match system_tools::write_clipboard(text) {
+                    Ok(msg) => msg,
+                    Err(e) => format!("Falha ao escrever no clipboard: {}", e),
+                }
+            }
+        }
+        "get_active_window" => match system_tools::get_active_window() {
+            Ok(info) => info,
+            Err(e) => format!("Falha ao obter janela ativa: {}", e),
+        },
+        "system_info" => {
+            let concise = tool_call.arguments.get("concise")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            match system_tools::system_info(concise) {
+                Ok(info) => info,
+                Err(e) => format!("Falha ao obter informações do sistema: {}", e),
+            }
+        },
+
+        // ── Tier 1: Notification Tools ───────────────────────────────────────
+        "schedule_notification" => {
+            let message = tool_call
+                .arguments
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "Lembrete".to_string());
+            let delay = json_opt_u64(&tool_call.arguments, "delay_seconds");
+            let dt_str = tool_call.arguments.get("datetime")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let sound = tool_call
+                .arguments
+                .get("sound")
+                .and_then(|v| v.as_str())
+                .map(notification_tools::ReminderSound::parse)
+                .unwrap_or_default();
+            let voice_delivery = Some(notification_tools::ReminderVoiceDelivery {
+                app: app.clone(),
+                config: config.clone(),
+            });
+            match notification_tools::schedule_notification(
+                &message,
+                delay,
+                dt_str.as_deref(),
+                sound,
+                voice_delivery,
+            )
+            .await
+            {
+                Ok(msg) => msg,
+                Err(e) => format!("Falha ao agendar lembrete: {}", e),
+            }
+        }
+        "clipboard_history" => {
+            let action = tool_call.arguments.get("action")
+                .and_then(|v| v.as_str()).unwrap_or("list");
+            let history_ref = &app.state::<AppState>().clipboard_history;
+            match action {
+                "get" => {
+                    let idx = tool_call.arguments.get("index")
+                        .and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    match history_ref.get(idx) {
+                        Some(text) => format!("Clipboard [{}]: {}", idx, text),
+                        None => format!("Índice {} fora do intervalo. O histórico tem {} entrada(s).", idx, history_ref.len()),
+                    }
+                }
+                _ => {
+                    let list = history_ref.list();
+                    notification_tools::format_clipboard_history(&list)
+                }
+            }
+        }
+
+        // ── Tier 1: File Tools ───────────────────────────────────────────────
+        "search_files" => {
+            let query = tool_call.arguments.get("query")
+                .and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let max = tool_call.arguments.get("max_results")
+                .and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+            if query.is_empty() {
+                "Faltou a consulta de busca.".to_string()
+            } else {
+                let _ = app.emit("processing", ProcessingState {
+                    stage: "thinking".to_string(),
+                    text: format!("Buscando arquivos: {}", query),
+                });
+                let sandbox = config.sandbox.clone();
+                match file_tools::search_files(&query, max, &sandbox) {
+                    Ok(result) => result,
+                    Err(e) => format!("Erro na busca de arquivos: {}", e),
+                }
+            }
+        }
+        "get_recent_files" => {
+            let max = tool_call.arguments.get("max")
+                .and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+            match file_tools::get_recent_files(max) {
+                Ok(result) => result,
+                Err(e) => format!("Erro ao obter arquivos recentes: {}", e),
+            }
+        }
+        "read_file" => {
+            let path = tool_call.arguments.get("path")
+                .and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if path.is_empty() {
+                "Faltou o caminho do arquivo.".to_string()
+            } else {
+                let sandbox = config.sandbox.clone();
+                match file_tools::read_file(&path, &sandbox) {
+                    Ok(content) => {
+                        if voice_compact {
+                            voice::prepare_read_aloud_for_tts(&content, Some(&path))
+                        } else {
+                            content
+                        }
+                    }
+                    Err(e) => format!("Erro ao ler arquivo: {}", e),
+                }
+            }
+        }
+        "write_file" => {
+            let path = tool_call.arguments.get("path")
+                .and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let content = tool_call.arguments.get("content")
+                .and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let overwrite = tool_call.arguments.get("overwrite")
+                .and_then(|v| v.as_bool()).unwrap_or(false);
+            if path.is_empty() {
+                "Faltou o caminho do arquivo.".to_string()
+            } else {
+                let sandbox = config.sandbox.clone();
+                match file_tools::write_file(&path, &content, overwrite, &sandbox) {
+                    Ok(msg) => msg,
+                    Err(e) => format!("Erro ao escrever arquivo: {}", e),
+                }
+            }
+        }
+        // calculator é resolvido no fast_path; este arm serve como fallback
+        "calculator" => {
+            tool_call.arguments.get("result")
+                .and_then(|v| v.as_str())
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "Resultado não disponível.".to_string())
+        }
+
+        // ── Tier 2: System Tools ─────────────────────────────────────────────
+        "manage_processes" => {
+            let action = tool_call.arguments.get("action")
+                .and_then(|v| v.as_str()).unwrap_or("list");
+            let name = tool_call.arguments.get("process_name")
+                .and_then(|v| v.as_str());
+            match system_tools::manage_processes(action, name) {
+                Ok(r) => r,
+                Err(e) => format!("manage_processes: {}", e),
+            }
+        }
+        "lock_screen" => match system_tools::lock_screen() {
+            Ok(r) => r,
+            Err(e) => format!("lock_screen: {}", e),
+        },
+        "open_folder" => {
+            let path = tool_call.arguments.get("path")
+                .and_then(|v| v.as_str()).unwrap_or("~");
+            match system_tools::open_folder(path) {
+                Ok(r) => r,
+                Err(e) => format!("open_folder: {}", e),
+            }
+        }
+        "set_wallpaper" => {
+            let path = tool_call.arguments.get("path")
+                .and_then(|v| v.as_str()).unwrap_or("");
+            if path.is_empty() {
+                "Faltou o caminho da imagem.".to_string()
+            } else {
+                match system_tools::set_wallpaper(path) {
+                    Ok(r) => r,
+                    Err(e) => format!("set_wallpaper: {}", e),
+                }
+            }
+        }
+        "get_open_windows" => match system_tools::get_open_windows() {
+            Ok(r) => r,
+            Err(e) => format!("get_open_windows: {}", e),
+        },
+        "toggle_do_not_disturb" => match system_tools::toggle_do_not_disturb() {
+            Ok(r) => r,
+            Err(e) => format!("toggle_do_not_disturb: {}", e),
+        },
+        "read_selected_text" => {
+            let result = system_tools::read_selected_text();
+            match result {
+                Ok(text) => {
+                    // Empurra o texto selecionado para o histórico do clipboard
+                    app.state::<AppState>().clipboard_history.push(text.clone());
+                    text
+                }
+                Err(e) => format!("read_selected_text: {}", e),
+            }
+        }
+        "translate_selection" => {
+            let source = tool_call
+                .arguments
+                .get("source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("auto");
+            let target_language = tool_call
+                .arguments
+                .get("target_language")
+                .and_then(|v| v.as_str());
+            let llm_url = config.effective_llm_url_voice();
+            let llm_model = config.effective_llm_model_voice();
+            let target = system_tools::resolve_translate_target(target_language, None);
+            match system_tools::translate_selection(
+                llm_url,
+                llm_model,
+                source,
+                target_language,
+                None,
+            )
+            .await
+            {
+                Ok(translated) => {
+                    let _ = system_tools::write_clipboard(&translated);
+                    app.state::<AppState>()
+                        .clipboard_history
+                        .push(translated.clone());
+                    system_tools::format_translation_result(&target, &translated)
+                }
+                Err(e) => format!("translate_selection: {}", e),
+            }
+        }
+        "paste_to_active_window" => {
+            let text = tool_call.arguments.get("text")
+                .and_then(|v| v.as_str()).unwrap_or("");
+            if text.is_empty() {
+                "Faltou o texto a colar.".to_string()
+            } else {
+                match system_tools::paste_to_active_window(text) {
+                    Ok(r) => r,
+                    Err(e) => format!("paste_to_active_window: {}", e),
+                }
+            }
+        }
+
+        // ── Tier 2: Session Notes ────────────────────────────────────────────
+        "session_notes" => {
+            let action = tool_call.arguments.get("action")
+                .and_then(|v| v.as_str()).unwrap_or("list");
+            let notes_ref = &app.state::<AppState>().session_notes;
+            match action {
+                "add" => {
+                    let text = tool_call.arguments.get("text")
+                        .and_then(|v| v.as_str()).unwrap_or("");
+                    notification_tools::session_note_add(notes_ref, text)
+                }
+                "clear" => notification_tools::session_note_clear(notes_ref),
+                _ => notification_tools::session_note_list(notes_ref),
+            }
+        }
+
+        // ── Tier 2: Diff Clipboard ───────────────────────────────────────────
+        "diff_clipboard" => {
+            let hist = app.state::<AppState>().clipboard_history.list();
+            notification_tools::diff_clipboard(&hist)
+        }
+
+        // ── Tier 2: OCR Image ────────────────────────────────────────────────
+        "ocr_image" => {
+            // Captura a tela e usa o vision endpoint para extrair texto (OCR)
+            let _ = app.emit("processing", ProcessingState {
+                stage: "thinking".to_string(),
+                text: "Lendo texto na tela...".to_string(),
+            });
+            let ocr_prompt = "Extraia TODO o texto visível nesta imagem, linha por linha, preservando a estrutura. Não descreva a imagem — apenas transcreva o texto.";
+            match tools::take_screenshot_region(None, None, None, None, None, Some(ocr_prompt)) {
+                Ok(image_b64) => {
+                    if let Err(e) = ensure_vision_server(app).await {
+                        return format!("Erro ao iniciar servidor de visão: {}", e);
+                    }
+                    let vision_url = if config.vision_url.is_empty() {
+                        &config.llm_url
+                    } else {
+                        &config.vision_url
+                    };
+                    let vision_model = if config.vision_model.is_empty() {
+                        "qwen2.5-vl-3b-instruct"
+                    } else {
+                        &config.vision_model
+                    };
+                    match tools::describe_screenshot(vision_url, vision_model, &image_b64, ocr_prompt, 2048).await {
+                        Ok(text) => {
+                            *app.state::<AppState>().vision_last_used.lock().unwrap() =
+                                std::time::Instant::now();
+                            text
+                        }
+                        Err(e) => format!("OCR falhou: {}", e),
+                    }
+                }
+                Err(e) => format!("Falha ao capturar tela para OCR: {}", e),
+            }
+        }
+
+        // ── Tier 2: Transcribe Audio File ────────────────────────────────────
+        "transcribe_audio_file" => {
+            let path = tool_call.arguments.get("path")
+                .and_then(|v| v.as_str()).unwrap_or("");
+            if path.is_empty() {
+                "Faltou o caminho do arquivo de áudio.".to_string()
+            } else {
+                let whisper_url = config.whisper_url.clone();
+                let sandbox = config.sandbox.clone();
+                match file_tools::transcribe_audio_file(path, &whisper_url, &sandbox).await {
+                    Ok(text) => text,
+                    Err(e) => format!("Transcrição falhou: {}", e),
+                }
+            }
+        }
+
+        // ── Tier 2: Audio Device Switch ──────────────────────────────────────
+        "audio_device_switch" => {
+            let action = tool_call.arguments.get("action")
+                .and_then(|v| v.as_str()).unwrap_or("list");
+            match action {
+                "switch" => {
+                    let device = tool_call.arguments.get("device_name")
+                        .and_then(|v| v.as_str()).unwrap_or("");
+                    if device.is_empty() {
+                        "Faltou device_name para switch.".to_string()
+                    } else {
+                        match media_controls::switch_audio_device(device) {
+                            Ok(r) => r,
+                            Err(e) => format!("audio_device_switch: {}", e),
+                        }
+                    }
+                }
+                _ => match media_controls::list_audio_devices() {
+                    Ok(r) => r,
+                    Err(e) => format!("audio_device_switch (list): {}", e),
+                },
+            }
+        }
+
+        // ── Tier 2: Run PowerShell Script ────────────────────────────────────
+        "run_powershell_script" => {
+            let path = tool_call.arguments.get("path")
+                .and_then(|v| v.as_str()).unwrap_or("");
+            if path.is_empty() {
+                "Faltou o caminho do script .ps1.".to_string()
+            } else {
+                let sandbox = config.sandbox.clone();
+                let audit_ref = &app.state::<AppState>().audit_log;
+                match file_tools::run_powershell_script(path, &sandbox, audit_ref) {
+                    Ok(r) => r,
+                    Err(e) => format!("run_powershell_script: {}", e),
+                }
+            }
+        }
+
+        // ── Tier 3: Network Info ────────────────────────────────────────────
+        "get_network_info" => match system_tools::get_network_info() {
+            Ok(r) => r,
+            Err(e) => format!("get_network_info: {}", e),
+        },
+
+        // ── Tier 3: take_screenshot_region (com coordenadas) ────────────────
+        "take_screenshot_region" => {
+            let x = tool_call.arguments.get("x").and_then(|v| v.as_u64()).map(|n| n as u32);
+            let y = tool_call.arguments.get("y").and_then(|v| v.as_u64()).map(|n| n as u32);
+            let w = tool_call.arguments.get("width").and_then(|v| v.as_u64()).map(|n| n as u32);
+            let h = tool_call.arguments.get("height").and_then(|v| v.as_u64()).map(|n| n as u32);
+            let question = tool_call.arguments.get("question").and_then(|v| v.as_str());
+            let _ = app.emit("processing", ProcessingState {
+                stage: "thinking".to_string(),
+                text: "Capturando região da tela...".to_string(),
+            });
+            match tools::take_screenshot_region(None, x, y, w, h, question) {
+                Ok(image_b64) => {
+                    if let Err(e) = ensure_vision_server(app).await {
+                        return format!("Erro ao iniciar servidor de visão: {}", e);
+                    }
+                    let vision_url = if config.vision_url.is_empty() {
+                        &config.llm_url
+                    } else {
+                        &config.vision_url
+                    };
+                    let vision_model = if config.vision_model.is_empty() {
+                        "qwen2.5-vl-3b-instruct"
+                    } else {
+                        &config.vision_model
+                    };
+                    let desc_question = question.unwrap_or("Descreva o que você vê nesta região da tela.");
+                    match tools::describe_screenshot(vision_url, vision_model, &image_b64, desc_question, 1024).await {
+                        Ok(desc) => {
+                            *app.state::<AppState>().vision_last_used.lock().unwrap() =
+                                std::time::Instant::now();
+                            desc
+                        }
+                        Err(e) => format!("Captura feita, mas visão falhou: {}", e),
+                    }
+                }
+                Err(e) => format!("Falha ao capturar região da tela: {}", e),
+            }
+        }
+
+        // ── Tier 3: Calendar Events (Outlook) ───────────────────────────────
+        "calendar_events" => {
+            let days = tool_call.arguments.get("days_ahead")
+                .and_then(|v| v.as_u64()).map(|n| n as u32);
+            match system_tools::calendar_events(days) {
+                Ok(r) => r,
+                Err(e) => format!("calendar_events: {}", e),
+            }
+        }
+
+        // ── Tier 3: Send Email (Outlook) ────────────────────────────────────
+        "send_email" => {
+            let to = tool_call.arguments.get("to")
+                .and_then(|v| v.as_str()).unwrap_or("");
+            let subject = tool_call.arguments.get("subject")
+                .and_then(|v| v.as_str()).unwrap_or("");
+            let body = tool_call.arguments.get("body")
+                .and_then(|v| v.as_str()).unwrap_or("");
+            if to.is_empty() {
+                "Faltou o destinatário (to).".to_string()
+            } else {
+                match system_tools::send_email(to, subject, body) {
+                    Ok(r) => r,
+                    Err(e) => format!("send_email: {}", e),
+                }
+            }
+        }
+
+        // ── Tier 3: Send Keys ───────────────────────────────────────────────
+        "send_keys" => {
+            let keys = tool_call.arguments.get("keys")
+                .and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            if keys.is_empty() {
+                "Faltou a tecla ou texto (keys).".to_string()
+            } else {
+                match system_tools::send_keys(&keys) {
+                    Ok(r) => r,
+                    Err(e) => format!("send_keys: {}", e),
+                }
+            }
+        }
+
+        // ── Tier 3: Watch File ──────────────────────────────────────────────
+        "watch_file" => {
+            let path = tool_call.arguments.get("path")
+                .and_then(|v| v.as_str()).unwrap_or("");
+            let duration = tool_call.arguments.get("duration_seconds")
+                .and_then(|v| v.as_u64()).unwrap_or(60);
+            let on_change = tool_call.arguments.get("on_change")
+                .and_then(|v| v.as_str()).map(|s| s.to_string());
+            if path.is_empty() {
+                "Faltou o caminho do arquivo (path).".to_string()
+            } else {
+                let sandbox = config.sandbox.clone();
+                match file_tools::watch_file(path, duration, &sandbox, on_change).await {
+                    Ok(r) => r,
+                    Err(e) => format!("watch_file: {}", e),
+                }
+            }
+        }
+
+        // ── Tier 3: Snippet Library ─────────────────────────────────────────
+        "snippet_library" => {
+            let action = tool_call.arguments.get("action")
+                .and_then(|v| v.as_str()).unwrap_or("list");
+            let rag = &app.state::<AppState>().rag_store;
+            match action {
+                "save" => {
+                    let name = tool_call.arguments.get("name")
+                        .and_then(|v| v.as_str()).unwrap_or("");
+                    let content = tool_call.arguments.get("content")
+                        .and_then(|v| v.as_str()).unwrap_or("");
+                    if name.is_empty() || content.is_empty() {
+                        "Faltou name ou content para salvar o snippet.".to_string()
+                    } else {
+                        match rag.save_snippet(name, content) {
+                            Ok(()) => format!("Snippet '{}' salvo.", name),
+                            Err(e) => format!("Erro ao salvar snippet: {}", e),
+                        }
+                    }
+                }
+                "get" => {
+                    let name = tool_call.arguments.get("name")
+                        .and_then(|v| v.as_str()).unwrap_or("");
+                    if name.is_empty() {
+                        "Faltou o nome do snippet.".to_string()
+                    } else {
+                        match rag.get_snippet(name) {
+                            Ok(Some(content)) => content,
+                            Ok(None) => format!("Snippet '{}' não encontrado.", name),
+                            Err(e) => format!("Erro ao obter snippet: {}", e),
+                        }
+                    }
+                }
+                "delete" => {
+                    let name = tool_call.arguments.get("name")
+                        .and_then(|v| v.as_str()).unwrap_or("");
+                    if name.is_empty() {
+                        "Faltou o nome do snippet.".to_string()
+                    } else {
+                        match rag.delete_snippet(name) {
+                            Ok(n) => format!("{} snippet(s) removido(s).", n),
+                            Err(e) => format!("Erro ao remover snippet: {}", e),
+                        }
+                    }
+                }
+                _ => {
+                    match rag.list_snippets() {
+                        Ok(snippets) => {
+                            if snippets.is_empty() {
+                                "Nenhum snippet salvo.".to_string()
+                            } else {
+                                let lines: Vec<String> = snippets.iter()
+                                    .map(|(name, updated)| format!("• {} (atualizado: {})", name, updated))
+                                    .collect();
+                                format!("Snippets ({}):\n{}", snippets.len(), lines.join("\n"))
+                            }
+                        }
+                        Err(e) => format!("Erro ao listar snippets: {}", e),
+                    }
+                }
+            }
+        }
+
+        // ── Tier 3: set_audio_volume_app ─────────────────────────────────────
+        "set_audio_volume_app" => {
+            let app_name = tool_call.arguments.get("app_name")
+                .and_then(|v| v.as_str()).unwrap_or("");
+            let volume = tool_call.arguments.get("volume")
+                .and_then(|v| v.as_u64()).unwrap_or(50) as u32;
+            if app_name.is_empty() {
+                "Faltou o nome do aplicativo (app_name).".to_string()
+            } else {
+                let app = app_name.to_string();
+                match tokio::task::spawn_blocking(move || {
+                    media_controls::set_audio_volume_app(&app, volume)
+                }).await {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(e)) => format!("set_audio_volume_app: {}", e),
+                    Err(e) => format!("Erro ao ajustar volume do app: {}", e),
+                }
+            }
+        }
+        // ── Tier 4 ──────────────────────────────────────────────────────────
+        "disk_cleanup" => {
+            let action = tool_call.arguments.get("action")
+                .and_then(|v| v.as_str()).unwrap_or("analyze");
+            let drive = tool_call.arguments.get("drive")
+                .and_then(|v| v.as_str());
+            match system_tools::disk_cleanup(action, drive) {
+                Ok(r) => r,
+                Err(e) => format!("disk_cleanup: {}", e),
+            }
+        }
+        "ui_automation" => {
+            let action = tool_call.arguments.get("action")
+                .and_then(|v| v.as_str()).unwrap_or("click");
+            let x = tool_call.arguments.get("x").and_then(|v| v.as_u64()).map(|n| n as u32);
+            let y = tool_call.arguments.get("y").and_then(|v| v.as_u64()).map(|n| n as u32);
+            let text = tool_call.arguments.get("text").and_then(|v| v.as_str());
+            let direction = tool_call.arguments.get("direction").and_then(|v| v.as_str());
+            let amount = tool_call.arguments.get("amount").and_then(|v| v.as_u64()).map(|n| n as u32);
+            match system_tools::ui_automation(action, x, y, text, direction, amount) {
+                Ok(r) => r,
+                Err(e) => format!("ui_automation: {}", e),
+            }
+        }
+        "image_generation" => {
+            let prompt = tool_call.arguments.get("prompt")
+                .and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if prompt.is_empty() {
+                "Faltou o prompt para geração de imagem.".to_string()
+            } else {
+                let neg = tool_call.arguments.get("negative_prompt")
+                    .and_then(|v| v.as_str()).map(|s| s.to_string());
+                let w = tool_call.arguments.get("width").and_then(|v| v.as_u64()).map(|n| n as u32);
+                let h = tool_call.arguments.get("height").and_then(|v| v.as_u64()).map(|n| n as u32);
+                let st = tool_call.arguments.get("steps").and_then(|v| v.as_u64()).map(|n| n as u32);
+                let url = tool_call.arguments.get("sd_url").and_then(|v| v.as_str());
+                let _ = app.emit("processing", ProcessingState {
+                    stage: "thinking".to_string(),
+                    text: format!("Gerando imagem: {}...", &prompt[..prompt.len().min(60)]),
+                });
+                match tools::image_generation(&prompt, neg.as_deref(), w, h, st, url).await {
+                    Ok(msg) => msg,
+                    Err(e) => format!("image_generation: {}", e),
+                }
+            }
+        }
+
         unknown => format!("Ferramenta desconhecida: {}", unknown),
     }
 }
+
+// ────────────────────────────────────────────────────────────────────────────
 
 /// Atualiza atalhos globais conforme `AppState.config` (chamar após startup ou `set_config`).
 fn register_global_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
@@ -2451,19 +3287,18 @@ fn register_global_hotkeys(app: &tauri::AppHandle) -> Result<(), String> {
     let k_clear = resolved_shortcut(&ks.shortcut_clear, "Shift+C");
     let k_chat = resolved_shortcut(&ks.shortcut_chat, "Shift+T");
     let k_settings = resolved_shortcut(&ks.shortcut_settings, "Ctrl+Comma");
+    let k_stop = resolved_shortcut(&ks.shortcut_stop, "Ctrl+5");
+
+    gs.on_shortcut(k_stop.as_str(), |app, _shortcut, event| {
+        if event.state == ShortcutState::Pressed {
+            interrupt_active_pipeline(app);
+        }
+    })
+    .map_err(|e| format!("Atalho parar: {}", e))?;
 
     gs.on_shortcut(k_voice.as_str(), |app, _shortcut, event| {
         match event.state {
             ShortcutState::Pressed => {
-                {
-                    let state = app.state::<AppState>();
-                    let mut cancel = state.pipeline_cancel.lock().unwrap();
-                    cancel.cancel();
-                    *cancel = CancellationToken::new();
-                }
-
-                let _ = app.emit("pipeline_interrupted", ());
-
                 if let Some(window) = app.get_webview_window("main") {
                     if let Ok(Some(monitor)) = window.current_monitor() {
                         let screen = monitor.size();
@@ -2659,6 +3494,8 @@ pub fn run() {
             warm_kill_token:    std::sync::atomic::AtomicU64::new(0),
             warm_ttl_secs:      300,
             warm_last_used:     Mutex::new(None),
+            clipboard_history:  notification_tools::ClipboardHistory::new(20),
+            session_notes:      Mutex::new(HashMap::new()),
         })
         .setup(|app| {
             let ks = app.state::<AppState>().config.lock().unwrap().clone();

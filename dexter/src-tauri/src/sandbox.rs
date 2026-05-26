@@ -52,6 +52,7 @@ fn default_readable_paths() -> Vec<String> {
         "~/Documents".to_string(),
         "~/Desktop".to_string(),
         "~/Downloads".to_string(),
+        "~/Pictures".to_string(),
         "~/Projects".to_string(),
     ]
 }
