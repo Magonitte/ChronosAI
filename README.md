@@ -34,11 +34,11 @@ Documentação técnica detalhada: [**`dexter/README.md`**](dexter/README.md).
 
 - **Push-to-talk** — segure **Shift+Z** para falar; **Shift+X** oculta o orb.
 - **Pipeline de voz** — microfone → **Whisper** (STT) → **LLM** (Llama 8B em `:8080`) → **XTTS** ou **Chatterbox** (TTS em `:8005`) → alto-falantes.
-- **Fast-path** — comandos frequentes (hora, clipboard, apps, mídia, etc.) executados sem passar pelo LLM quando o texto casa com padrões em português.
+- **Fast-path** — dezenas de comandos em português (hora, calculadora, clipboard, apps, mídia, arquivos, tradução, etc.) executados **sem LLM** quando o texto casa com padrões em `fast_path.rs`.
 - **LLM on-demand** — voz usa **Llama 8B**; ao abrir o **chat de texto** (**Shift+T**), o app troca para **Qwen** em `:8084` e libera VRAM; ao fechar, repõe Llama + XTTS automaticamente.
 - **Streaming** — tokens do LLM em fluxo; frases completas vão ao TTS assim que fecham (menor latência percebida).
 - **Visão on-demand** — **Qwen2.5-VL** em `:8083` sobe na primeira screenshot e desliga após inatividade.
-- **Ferramentas** — screenshot, clipboard, URLs, horário, processos, sandbox PowerShell, web, RAG, apps Windows, mídia e volume.
+- **53 ferramentas (tools)** — sistema, arquivos, clipboard, notificações, janelas, rede, calendário, e-mail, OCR, transcrição, automação de UI, geração de imagem, mídia, web, RAG e mais (lista completa em [`dexter/README.md`](dexter/README.md#ferramentas-disponíveis)).
 - **RAG** — SQLite + embeddings (BGE-M3 ou servidor compatível com `/embedding`).
 
 ---
@@ -127,7 +127,7 @@ Chronos_AI_v2/
 ├── dexter/                        ← aplicativo Chronos / Dexter
 │   ├── README.md                  ← visão técnica completa
 │   ├── src/                       ← React (Vite)
-│   ├── src-tauri/                 ← Rust (voz, tools, RAG, LLM on-demand, fast-path)
+│   ├── src-tauri/                 ← Rust (voz, 53 tools, RAG, LLM on-demand, fast-path)
 │   ├── xtts-api-server/           ← API XTTS v2 (TTS padrão)
 │   ├── chatterbox-tts-api/        ← API Chatterbox (alternativa)
 │   ├── start-all.ps1              ← launcher oficial (Windows)
